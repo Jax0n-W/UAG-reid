@@ -667,9 +667,12 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             pseudo_labels_ir = cluster_ir.fit_predict(rerank_dist_ir)
             rerank_dist_rgb = compute_jaccard_distance(features_rgb, k1=args.k1, k2=args.k2, search_option=3)
             pseudo_labels_rgb = cluster_rgb.fit_predict(rerank_dist_rgb)
-            rerank_dist_all = compute_modal_invariant_jaccard_distance(features_all, k1=40, k2=32,
-                                                                       file=sorted(dataset_rgb.train) + sorted(
-                                                                           dataset_ir.train), search_option=3)
+            rerank_dist_all = compute_modal_invariant_jaccard_distance(
+                features_all, k1=args.k1, k2=args.k2,
+                file=sorted(dataset_rgb.train) + sorted(dataset_ir.train),
+                modalities=(['rgb'] * len(features_rgb) +
+                            ['ir'] * len(features_ir)),
+                search_option=3)
             pseudo_labels_all = cluster_all.fit_predict(rerank_dist_all)
             del rerank_dist_rgb
             del rerank_dist_ir

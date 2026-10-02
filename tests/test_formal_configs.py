@@ -80,6 +80,17 @@ class FormalConfigTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn('eps=0.55', completed.stdout)
 
+    def test_clustering_uses_cli_eps_and_knn_values(self):
+        for script in ('train_agreid.py', 'train_lag.py'):
+            source = (ROOT / script).read_text(encoding='utf-8')
+            self.assertIn('ir_eps = args.eps', source)
+            self.assertIn('rgb_eps = args.eps', source)
+            self.assertIn('all_eps = args.eps', source)
+            self.assertNotIn('ir_eps = 0.3', source)
+            self.assertNotIn('rgb_eps = 0.3', source)
+            self.assertNotIn('all_eps = 0.3', source)
+            self.assertNotIn('k1=40, k2=32', source)
+
 
 if __name__ == '__main__':
     unittest.main()

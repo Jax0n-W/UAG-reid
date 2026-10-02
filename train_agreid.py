@@ -515,10 +515,10 @@ def main_worker_stage1(args,log_s1_name):
         with torch.no_grad():
             if epoch == 0:
                 # DBSCAN cluster
-                ir_eps = 0.3
+                ir_eps = args.eps
                 print('IR Clustering criterion: eps: {:.3f}'.format(ir_eps))
                 cluster_ir = DBSCAN(eps=ir_eps, min_samples=4, metric='precomputed', n_jobs=-1)
-                rgb_eps = 0.3
+                rgb_eps = args.eps
                 print('RGB Clustering criterion: eps: {:.3f}'.format(rgb_eps))
                 cluster_rgb = DBSCAN(eps=rgb_eps, min_samples=4, metric='precomputed', n_jobs=-1)
 
@@ -869,13 +869,13 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
         with torch.no_grad():
             if epoch == start_epoch:
                 # DBSCAN cluster
-                ir_eps = 0.3
+                ir_eps = args.eps
                 print('IR Clustering criterion: eps: {:.3f}'.format(ir_eps))
                 cluster_ir = DBSCAN(eps=ir_eps, min_samples=4, metric='precomputed', n_jobs=-1)
-                rgb_eps = 0.3
+                rgb_eps = args.eps
                 print('RGB Clustering criterion: eps: {:.3f}'.format(rgb_eps))
                 cluster_rgb = DBSCAN(eps=rgb_eps, min_samples=4, metric='precomputed', n_jobs=-1)
-                all_eps = 0.3
+                all_eps = args.eps
                 print('All Clustering criterion: eps: {:.3f}'.format(all_eps))
                 cluster_all = DBSCAN(eps=all_eps, min_samples=4, metric='precomputed', n_jobs=-1)
                 if resume_cluster_eps is not None:
@@ -940,9 +940,12 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
                 num_cluster_rgb = 1
 
             # Adaptive clustering for ALL
-            rerank_dist_all = compute_modal_invariant_jaccard_distance(features_all, k1=40, k2=32,
-                                                                       file=sorted(dataset_rgb.train) + sorted(
-                                                                           dataset_ir.train), search_option=3)
+            rerank_dist_all = compute_modal_invariant_jaccard_distance(
+                features_all, k1=args.k1, k2=args.k2,
+                file=sorted(dataset_rgb.train) + sorted(dataset_ir.train),
+                modalities=(['rgb'] * len(features_rgb) +
+                            ['ir'] * len(features_ir)),
+                search_option=3)
             attempt = 0
             while attempt < max_attempts:
                 pseudo_labels_all = cluster_all.fit_predict(rerank_dist_all)

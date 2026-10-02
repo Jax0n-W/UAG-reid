@@ -123,11 +123,38 @@ def compute_jaccard_distance(target_features, k1=20, k2=6, print_flag=True, sear
     return jaccard_dist
 
 
-def compute_modal_invariant_jaccard_distance(target_features, file, k1=20, k2=6, print_flag=True, search_option=0, use_float16=False):
+def _resolve_modalities(file, sample_count, modalities=None):
+    if modalities is not None:
+        resolved = [str(modality).lower() for modality in modalities]
+    else:
+        resolved = []
+        for fname, _, _ in file:
+            normalized = fname.replace('\\', '/').lower()
+            parts = set(normalized.split('/'))
+            if 'ir_modify' in parts or 'aerial_modify' in parts:
+                resolved.append('ir')
+            elif 'rgb_modify' in parts or 'ground_modify' in parts:
+                resolved.append('rgb')
+            else:
+                raise ValueError(
+                    'Cannot infer modality from path: {}. Pass explicit '
+                    'modalities to compute_modal_invariant_jaccard_distance.'
+                    .format(fname))
+    if len(resolved) != sample_count:
+        raise ValueError('Expected {} modality labels, got {}'.format(
+            sample_count, len(resolved)))
+    invalid = sorted(set(resolved) - {'ir', 'rgb'})
+    if invalid:
+        raise ValueError('Unsupported modality labels: {}'.format(invalid))
+    return resolved
+
+
+def compute_modal_invariant_jaccard_distance(
+        target_features, file, k1=20, k2=6, print_flag=True,
+        search_option=0, use_float16=False, modalities=None):
     end = time.time()
-    all_file_name = []
-    for i, (fname, _, cid) in enumerate(file):
-        all_file_name.append(fname)
+    resolved_modalities = _resolve_modalities(
+        file, target_features.size(0), modalities=modalities)
 
     if print_flag:
         print('Computing jaccard distance...')
@@ -197,21 +224,25 @@ def compute_modal_invariant_jaccard_distance(target_features, file, k1=20, k2=6,
 
             for ii in initial_rank[i,:k2]:
 
-                if 'ir_modify' in all_file_name[ii]:
+                if resolved_modalities[ii] == 'ir':
                     feas_NIR_temp.append(V[ii,:])
-                elif 'rgb_modify' in all_file_name[ii]:
+                elif resolved_modalities[ii] == 'rgb':
                     feas_VIS_temp.append(V[ii,:])
-            feas_VIS_temp=np.array(feas_VIS_temp)
-            feas_NIR_temp=np.array(feas_NIR_temp)
-
-            NIR_embedings_person_mean = np.mean(feas_NIR_temp, axis=0)
-            VIS_embedings_person_mean = np.mean(feas_VIS_temp, axis=0)
+            if len(feas_VIS_temp) == 0 and len(feas_NIR_temp) == 0:
+                raise RuntimeError(
+                    'Query expansion found no valid modality neighbors')
             if len(feas_VIS_temp) == 0:
-                V_qe[i, :] = NIR_embedings_person_mean
+                V_qe[i, :] = np.mean(np.asarray(feas_NIR_temp), axis=0)
             elif len(feas_NIR_temp) == 0:
-                V_qe[i, :] = VIS_embedings_person_mean
+                V_qe[i, :] = np.mean(np.asarray(feas_VIS_temp), axis=0)
             else:
-                V_qe[i, :] = np.mean([NIR_embedings_person_mean, VIS_embedings_person_mean], axis=0)
+                NIR_embedings_person_mean = np.mean(
+                    np.asarray(feas_NIR_temp), axis=0)
+                VIS_embedings_person_mean = np.mean(
+                    np.asarray(feas_VIS_temp), axis=0)
+                V_qe[i, :] = np.mean(
+                    [NIR_embedings_person_mean, VIS_embedings_person_mean],
+                    axis=0)
 
         V = V_qe
         del V_qe
@@ -234,6 +265,8 @@ def compute_modal_invariant_jaccard_distance(target_features, file, k1=20, k2=6,
             # temp_max[0,indImages[j]] = temp_max[0,indImages[j]]+np.maximum(V[i,indNonZero[j]],V[indImages[j],indNonZero[j]])
 
         jaccard_dist[i] = 1-temp_min/(2-temp_min)
+        if print_flag and ((i + 1) % 1000 == 0 or i + 1 == N):
+            print('Modal-invariant Jaccard rows: {}/{}'.format(i + 1, N))
         # jaccard_dist[i] = 1-temp_min/(temp_max+1e-6)
 
     del invIndex, V
