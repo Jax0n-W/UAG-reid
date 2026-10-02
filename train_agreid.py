@@ -204,9 +204,11 @@ def get_test_loader(dataset, height, width, batch_size, workers, testset=None,te
 
 def create_model(args):
     model = models.create(args.arch, num_features=args.features, norm=True, dropout=args.dropout,
-                          num_classes=0, pooling_type=args.pooling_type)
+                          num_classes=0, pooling_type=args.pooling_type,
+                          pretrained_path=args.pretrained_resnet50)
     model_ema = models.create(args.arch, num_features=args.features, norm=True, dropout=args.dropout,
-                          num_classes=0, pooling_type=args.pooling_type)
+                          num_classes=0, pooling_type=args.pooling_type,
+                          pretrained_path=args.pretrained_resnet50)
     # use CUDA
     model.cuda()
     model_ema.cuda()
@@ -412,8 +414,11 @@ def main():
     validate_method_args(args)
     args.experiment_tag = experiment_tag(args)
     if args.dry_run:
-        print('[SMOKE] AG-ReID experiment={} rahp={} cesa={}'.format(
-            args.experiment_tag, args.use_rahp, args.use_cesa))
+        print('[CONFIG]\ndataset=AG-ReID\nformal_protocol=A-to-G,G-to-A\n'
+              'arch={}\nmemorybank={}\ncheckpoint=fixed-final\n'
+              'eval_during_train={}\nrahp={}\ncesa={}'.format(
+                  args.arch, args.memorybank, args.eval_during_train,
+                  args.use_rahp, args.use_cesa))
         return
     # ========== AGVA 参数合法性检查 ==========
     if not (0.0 <= args.agva_ir_prob <= 1.0):
@@ -1318,12 +1323,12 @@ if __name__ == '__main__':
     # data
     parser.add_argument('-d', '--dataset', type=str, default='agreid_ir',
                         choices=['agreid_ir'])
-    parser.add_argument('-b', '--batch-size', type=int, default=2)
+    parser.add_argument('-b', '--batch-size', type=int, default=64)
     parser.add_argument('--test-batch', type=int, default=64, help="test batch size for feature extraction")
     parser.add_argument('-j', '--workers', type=int, default=8)
     parser.add_argument('--height', type=int, default=288, help="input height")
     parser.add_argument('--width', type=int, default=144, help="input width")
-    parser.add_argument('--num-instances', type=int, default=4,
+    parser.add_argument('--num-instances', type=int, default=16,
                         help="each minibatch consist of "
                              "(batch_size // num_instances) identities, and "
                              "each identity has num_instances instances, "
@@ -1371,6 +1376,8 @@ if __name__ == '__main__':
                         default=osp.join(working_dir, 'data'))
     parser.add_argument('--logs-dir', type=str, metavar='PATH',
                         default=osp.join(working_dir, 'logs'))
+    parser.add_argument('--pretrained-resnet50', type=str, default=None,
+                        help='baseline resnet50-19c8e357.pth; CLI overrides PCLHD_RESNET50_PRETRAINED')
     parser.add_argument('--pooling-type', type=str, default='gem')
     parser.add_argument('--use-hard', action="store_true")
     parser.add_argument('--no-cam',  action="store_true")

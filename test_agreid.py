@@ -15,12 +15,14 @@ from torch.autograd import Variable
 
 from clustercontrast import datasets
 from clustercontrast import models
+from clustercontrast.methods.evaluation import load_agw_checkpoint_strict
 from clustercontrast.utils.data import transforms as T
 from clustercontrast.utils.serialization import load_checkpoint
 
 def create_model(args):
     model = models.create(args.arch, num_features=args.features, norm=True, dropout=args.dropout,
-                          num_classes=0, pooling_type=args.pooling_type)
+                          num_classes=0, pooling_type=args.pooling_type,
+                          pretrained_path=args.pretrained_resnet50)
     model.cuda()
     model = nn.DataParallel(model)
     return model
@@ -177,7 +179,7 @@ def main_worker(args):
     
     print(f'==> Loading weights from: {checkpoint_path}')
     checkpoint = load_checkpoint(checkpoint_path)
-    model.load_state_dict(checkpoint['state_dict'])
+    load_agw_checkpoint_strict(model, checkpoint)
     model.eval()
 
     # ==========================================
@@ -232,7 +234,8 @@ def main_worker(args):
 
 def main():
     parser = argparse.ArgumentParser(description="AG-ReID Test")
-    parser.add_argument('-a', '--arch', type=str, default='resnet50', choices=models.names())
+    parser.add_argument('-a', '--arch', type=str, default='agw', choices=['agw'],
+                        help='evaluation architecture (default: agw)')
     parser.add_argument('--features', type=int, default=0)
     parser.add_argument('--dropout', type=float, default=0)
     parser.add_argument('--pooling-type', type=str, default='gem')
@@ -240,6 +243,8 @@ def main():
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--data-dir', type=str, required=True)
     parser.add_argument('--checkpoint', type=str, required=True)
+    parser.add_argument('--pretrained-resnet50', type=str, default=None,
+                        help='baseline resnet50-19c8e357.pth; CLI overrides PCLHD_RESNET50_PRETRAINED')
     parser.add_argument('--height', type=int, default=288)
     parser.add_argument('--width', type=int, default=144)
     parser.add_argument('--trial', type=int, default=1)

@@ -91,10 +91,10 @@ def weights_init_classifier(m):
 
 
 class visible_module(nn.Module):
-    def __init__(self, arch='resnet50'):
+    def __init__(self, arch='resnet50', pretrained_path=None):
         super(visible_module, self).__init__()
 
-        model_v = resnet50_agw(pretrained=True,
+        model_v = resnet50_agw(pretrained=True, pretrained_path=pretrained_path,
                            last_conv_stride=1, last_conv_dilation=1)
         # avg pooling to global pooling
         self.visible = model_v
@@ -108,10 +108,10 @@ class visible_module(nn.Module):
 
 
 class thermal_module(nn.Module):
-    def __init__(self, arch='resnet50'):
+    def __init__(self, arch='resnet50', pretrained_path=None):
         super(thermal_module, self).__init__()
 
-        model_t = resnet50_agw(pretrained=True,
+        model_t = resnet50_agw(pretrained=True, pretrained_path=pretrained_path,
                            last_conv_stride=1, last_conv_dilation=1)
         # avg pooling to global pooling
         self.thermal = model_t
@@ -125,10 +125,10 @@ class thermal_module(nn.Module):
 
 
 class base_resnet(nn.Module):
-    def __init__(self, arch='resnet50'):
+    def __init__(self, arch='resnet50', pretrained_path=None):
         super(base_resnet, self).__init__()
 
-        model_base = resnet50_agw(pretrained=True,
+        model_base = resnet50_agw(pretrained=True, pretrained_path=pretrained_path,
                               last_conv_stride=1, last_conv_dilation=1)
         # avg pooling to global pooling
         model_base.avgpool = nn.AdaptiveAvgPool2d((1, 1))
@@ -143,12 +143,13 @@ class base_resnet(nn.Module):
 
 #####
 class embed_net_ori(nn.Module):
-    def __init__(self,  num_classes=1000, no_local= 'on', gm_pool = 'on', arch='resnet50'):
+    def __init__(self, num_classes=1000, no_local='on', gm_pool='on',
+                 arch='resnet50', pretrained_path=None):
         super(embed_net_ori, self).__init__()
 
-        self.thermal_module = thermal_module(arch=arch)
-        self.visible_module = visible_module(arch=arch)
-        self.base_resnet = base_resnet(arch=arch)
+        self.thermal_module = thermal_module(arch=arch, pretrained_path=pretrained_path)
+        self.visible_module = visible_module(arch=arch, pretrained_path=pretrained_path)
+        self.base_resnet = base_resnet(arch=arch, pretrained_path=pretrained_path)
         self.non_local = no_local
         if self.non_local =='on':
             layers=[3, 4, 6, 3]
@@ -258,11 +259,12 @@ class embed_net_ori(nn.Module):
 
 
 
-def agw(pretrained=False,no_local= 'down', **kwargs):
+def agw(pretrained=False, no_local='down', pretrained_path=None, **kwargs):
     """Constructs a ResNet-50 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
-    model = embed_net_ori(no_local= 'on', gm_pool = 'on') #without no-local -> resnet with non-local->agw
+    model = embed_net_ori(no_local='on', gm_pool='on',
+                          pretrained_path=pretrained_path)
 
     return model

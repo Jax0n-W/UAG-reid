@@ -108,25 +108,19 @@ The testing script loads the trained checkpoint and computes metrics such as **R
 
 ## AG-ReID / LAGPeR RAHP and CESA experiments
 
-All four formal ablations use `CMhybrid` in Stage 1 and disable training-time test evaluation. Checkpoints follow a fixed final epoch policy; use the Stage 2 `model_final.pth.tar` for final evaluation.
+All four formal ablations use `CMhybrid` in Stage 1 and disable training-time test evaluation. Checkpoints follow a fixed final epoch policy; use the Stage 2 `model_final.pth.tar` for final evaluation. Training and testing require the same `resnet50-19c8e357.pth` through `PRETRAINED_RESNET50`, `--pretrained-resnet50`, or `PCLHD_RESNET50_PRETRAINED`.
 
 ```bash
-# AG-ReID: Baseline / RAHP / CESA / Full
-python train_agreid.py --data-dir /path/to/AG-ReID-root --memorybank CMhybrid --eval-during-train=False
-python train_agreid.py --data-dir /path/to/AG-ReID-root --memorybank CMhybrid --eval-during-train=False --use-rahp
-python train_agreid.py --data-dir /path/to/AG-ReID-root --memorybank CMhybrid --eval-during-train=False --use-cesa
-python train_agreid.py --data-dir /path/to/AG-ReID-root --memorybank CMhybrid --eval-during-train=False --use-rahp --use-cesa
-
-# LAGPeR: Baseline / RAHP / CESA / Full
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-rahp
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-cesa
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-rahp --use-cesa
+# Frozen Baseline / RAHP / CESA / Full suites
+DATA_DIR=/path/to/AG-ReID-root LOGS_DIR=logs/agreid PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_agreid_ablation.sh
+DATA_DIR=/path/to/LAGPeR-root LOGS_DIR=logs/lagper PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_lagper_ablation.sh
 
 # Separate final evaluation
-python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_final.pth.tar --trial 1 --batch-size 64 --workers 8
-python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --trial 1 --batch-size 64 --workers 8
+python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
+python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
 ```
+
+LAGPeR requires an externally prepared official four-scene train / three-scene test manifest tree. The deprecated `prepare_lag.py` cannot create it from AG-ReID. See the technical design for the exact contract.
 
 See `docs/rahp-cesa-technical-design.md` for the frozen method definitions and protocol details.
 

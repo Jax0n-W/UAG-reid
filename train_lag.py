@@ -19,6 +19,7 @@ import torch.nn.functional as F
 
 from clustercontrast import datasets
 from clustercontrast import models
+from clustercontrast.datasets.lagper_protocol import evaluation_arrays
 from clustercontrast.models.cm import ClusterMemory
 from clustercontrast.methods.rahp import (
     RAHPSelectionStats, compute_rahp_reliability, disabled_rahp_diagnostics,
@@ -138,9 +139,11 @@ def get_test_loader(dataset, height, width, batch_size, workers, testset=None, t
 
 def create_model(args):
     model = models.create(args.arch, num_features=args.features, norm=True, dropout=args.dropout,
-                          num_classes=0, pooling_type=args.pooling_type)
+                          num_classes=0, pooling_type=args.pooling_type,
+                          pretrained_path=args.pretrained_resnet50)
     model_ema = models.create(args.arch, num_features=args.features, norm=True, dropout=args.dropout,
-                              num_classes=0, pooling_type=args.pooling_type)
+                              num_classes=0, pooling_type=args.pooling_type,
+                              pretrained_path=args.pretrained_resnet50)
     model.cuda()
     model_ema.cuda()
     model = nn.DataParallel(model)
@@ -229,15 +232,15 @@ def extract_query_feat(model, query_loader, nquery):
 
 
 def process_test_lag(img_dir, trial=1, modal='visible'):
+    if trial != 1:
+        raise ValueError('Official LAGPeR scene split has one fixed trial (trial=1).')
     if modal == 'visible':
-        input_data_path = osp.join(img_dir, 'idx/test_ground_{}.txt'.format(trial))
+        paths, labels, _ = evaluation_arrays(img_dir, 'query', 'ground')
     elif modal == 'thermal':
-        input_data_path = osp.join(img_dir, 'idx/test_aerial_{}.txt'.format(trial))
-    with open(input_data_path) as f:
-        data_file_list = open(input_data_path, 'rt').read().splitlines()
-        file_image = [osp.join(img_dir, s.split(' ')[0]) for s in data_file_list]
-        file_label = [int(s.split(' ')[1]) for s in data_file_list]
-    return file_image, np.array(file_label)
+        paths, labels, _ = evaluation_arrays(img_dir, 'gallery', 'aerial')
+    else:
+        raise ValueError("modal must be 'visible' or 'thermal'")
+    return paths, labels
 
 
 def eval_regdb(distmat, q_pids, g_pids, max_rank=20):
@@ -284,7 +287,7 @@ def eval_regdb(distmat, q_pids, g_pids, max_rank=20):
     return all_cmc, mAP, mINP
 
 
-def associated_analysis_for_all(all_origin, all_pred, image_paths_for_all, log_dir):
+def associated_analysis_for_all(all_origin, all_pred, modalities_for_all, log_dir):
     label_count_all = -1
     all_label_set = list(set(all_pred))
     all_label_set.sort()
@@ -299,10 +302,10 @@ def associated_analysis_for_all(all_origin, all_pred, image_paths_for_all, log_d
         flag_rgb = 0
         for idx, lab in enumerate(all_pred):
             if lab_ == lab:
-                if 'aerial_modify' in image_paths_for_all[idx]:
+                if modalities_for_all[idx] == 'aerial':
                     flag_ir = 1
                     flag_ir_list[idx_] = 1
-                elif 'ground_modify' in image_paths_for_all[idx]:
+                elif modalities_for_all[idx] == 'ground':
                     flag_rgb = 1
                     flag_rgb_list[idx_] = 1
         class_NIRVIS_list_modal_all.extend([class_NIRVIS_list_modal])
@@ -319,8 +322,11 @@ def main():
     validate_method_args(args)
     args.experiment_tag = experiment_tag(args)
     if args.dry_run:
-        print('[SMOKE] LAGPeR experiment={} rahp={} cesa={}'.format(
-            args.experiment_tag, args.use_rahp, args.use_cesa))
+        print('[CONFIG]\ndataset=LAGPeR\nprotocol=official-scene-split\n'
+              'train_scenes=4\ntest_scenes=3\narch={}\nmemorybank={}\n'
+              'checkpoint=fixed-final\neval_during_train={}\nrahp={}\ncesa={}'.format(
+                  args.arch, args.memorybank, args.eval_during_train,
+                  args.use_rahp, args.use_cesa))
         return
     if args.seed is not None:
         random.seed(args.seed)
@@ -691,15 +697,14 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             centers_RBG = collections.defaultdict(list)
             centers_IR_mean = collections.defaultdict(list)
             centers_RBG_mean = collections.defaultdict(list)
+            ground_count = len(dataset_rgb.train)
             for i, (label, (fname, _, cid)) in enumerate(zip(labels, file)):
                 if label == -1:
                     continue
-                if 'aerial_modify' in fname:
+                if i >= ground_count:
                     centers_IR[labels[i]].append(features[i])
-                elif 'ground_modify' in fname:
-                    centers_RBG[labels[i]].append(features[i])
                 else:
-                    raise AssertionError
+                    centers_RBG[labels[i]].append(features[i])
             for i in range(num_cluster_all):
                 if centers_RBG[i] != []:
                     centers_RBG_mean[i] = torch.stack(centers_RBG[i], dim=0).mean(0)
@@ -806,13 +811,16 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
 
         all_label = []
         all_file_name = []
+        all_modalities = []
+        ground_count = len(dataset_rgb.train)
         for i, ((fname, _, cid), label) in enumerate(
                 zip(sorted(dataset_rgb.train) + sorted(dataset_ir.train), pseudo_labels_all)):
             if label != -1:
                 all_file_name.append(fname)
                 all_label.append(label.item())
+                all_modalities.append('ground' if i < ground_count else 'aerial')
 
-        flag_ir_list, flag_rgb_list = associated_analysis_for_all(pseudo_labels_all, all_label, all_file_name,
+        flag_ir_list, flag_rgb_list = associated_analysis_for_all(pseudo_labels_all, all_label, all_modalities,
                                                                   args.logs_dir)
         print('==> Statistics for ALL epoch {}: {} clusters'.format(epoch, num_cluster_all))
 
@@ -826,11 +834,11 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             if label != -1:
                 all_file_name.append(fname)
                 all_label.append(label.item())
-            if (not args.use_rahp or label != -1) and 'aerial_modify' in fname and flag_ir_list[label] == 1 and flag_rgb_list[label] == 1:
+            if (not args.use_rahp or label != -1) and i >= ground_count and flag_ir_list[label] == 1 and flag_rgb_list[label] == 1:
                 pseudo_labeled_dataset_all_ir.append((fname, label.item(), cid))
                 if args.use_rahp:
                     q_all_ir_filtered.append(q_all_full[i])
-            elif (not args.use_rahp or label != -1) and 'ground_modify' in fname and flag_ir_list[label] == 1 and flag_rgb_list[label] == 1:
+            elif (not args.use_rahp or label != -1) and i < ground_count and flag_ir_list[label] == 1 and flag_rgb_list[label] == 1:
                 pseudo_labeled_dataset_all_rgb.append((fname, label.item(), cid))
                 if args.use_rahp:
                     q_all_rgb_filtered.append(q_all_full[i])
@@ -1014,11 +1022,11 @@ if __name__ == '__main__':
     # data
     parser.add_argument('-d', '--dataset', type=str, default='lag',
                         choices=['lag'])
-    parser.add_argument('-b', '--batch-size', type=int, default=2)
+    parser.add_argument('-b', '--batch-size', type=int, default=64)
     parser.add_argument('-j', '--workers', type=int, default=8)
     parser.add_argument('--height', type=int, default=288, help="input height")
     parser.add_argument('--width', type=int, default=144, help="input width")
-    parser.add_argument('--num-instances', type=int, default=4,
+    parser.add_argument('--num-instances', type=int, default=16,
                         help="each minibatch consist of "
                              "(batch_size // num_instances) identities, and "
                              "each identity has num_instances instances, "
@@ -1067,6 +1075,8 @@ if __name__ == '__main__':
                         default=osp.join(working_dir, 'data'))
     parser.add_argument('--logs-dir', type=str, metavar='PATH',
                         default=osp.join(working_dir, 'logs'))
+    parser.add_argument('--pretrained-resnet50', type=str, default=None,
+                        help='baseline resnet50-19c8e357.pth; CLI overrides PCLHD_RESNET50_PRETRAINED')
     parser.add_argument('--use-hard', action="store_true")
     parser.add_argument('--no-cam', action="store_true")
     parser.add_argument('--resume', type=str, default='',

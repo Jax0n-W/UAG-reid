@@ -47,3 +47,11 @@ def validate_method_args(args):
     if (args.use_rahp and not getattr(args, 'stage2_only', False)
             and getattr(args, 'memorybank', None) != 'CMhybrid'):
         raise ValueError('RAHP Stage1 requires --memorybank CMhybrid.')
+    batch_size = getattr(args, 'batch_size', None)
+    num_instances = getattr(args, 'num_instances', None)
+    if batch_size is not None and num_instances is not None and num_instances > 0:
+        if batch_size < 2 * num_instances or (batch_size // 2) % num_instances:
+            raise ValueError(
+                '--batch-size must provide complete identity groups in both domain '
+                'loaders: require batch_size >= 2 * num_instances and '
+                '(batch_size // 2) % num_instances == 0.')

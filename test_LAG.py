@@ -15,12 +15,15 @@ from torch.autograd import Variable
 
 from clustercontrast import datasets
 from clustercontrast import models
+from clustercontrast.datasets.lagper_protocol import evaluation_arrays
+from clustercontrast.methods.evaluation import load_agw_checkpoint_strict
 from clustercontrast.utils.data import transforms as T
 from clustercontrast.utils.serialization import load_checkpoint
 
 def create_model(args):
     model = models.create(args.arch, num_features=args.features, norm=True, dropout=args.dropout,
-                          num_classes=0, pooling_type=args.pooling_type)
+                          num_classes=0, pooling_type=args.pooling_type,
+                          pretrained_path=args.pretrained_resnet50)
     model.cuda()
     model = nn.DataParallel(model)
     return model
@@ -100,18 +103,12 @@ def extract_query_feat(model, query_loader, nquery):
     print('Extracting Time:\t {:.3f}'.format(time.time()-start))
     return query_feat_fc
 
-def process_test_regdb(img_dir, trial=1, modal='visible'):
-    if modal == 'visible':
-        input_data_path = osp.join(img_dir, 'idx', 'test_visible_{}.txt'.format(trial))
-    elif modal == 'thermal':
-        input_data_path = osp.join(img_dir, 'idx', 'test_thermal_{}.txt'.format(trial))
-    
-    with open(input_data_path) as f:
-        data_file_list = f.read().splitlines()
-        file_image = [osp.join(img_dir, s.split(' ')[0]) for s in data_file_list]
-        file_label = [int(s.split(' ')[1]) for s in data_file_list]
-        
-    return file_image, np.array(file_label)
+def process_test_lagper(img_dir, split, view):
+    return evaluation_arrays(img_dir, split, view)
+
+
+def valid_gallery_mask(q_pid, q_camid, g_pids, g_camids):
+    return ~((g_pids == q_pid) & (g_camids == q_camid))
 
 def eval_lagper(distmat, q_pids, g_pids, max_rank=20, q_camids=None, g_camids=None):
     num_q, num_g = distmat.shape
@@ -124,15 +121,14 @@ def eval_lagper(distmat, q_pids, g_pids, max_rank=20, q_camids=None, g_camids=No
     all_INP = []
     num_valid_q = 0.
     
-    if q_camids is None: q_camids = np.ones(num_q).astype(np.int32)
-    if g_camids is None: g_camids = 2 * np.ones(num_g).astype(np.int32)
+    if q_camids is None or g_camids is None:
+        raise ValueError('LAGPeR evaluation requires real q_camids and g_camids.')
     
     for q_idx in range(num_q):
         q_pid = q_pids[q_idx]
         q_camid = q_camids[q_idx]
         order = indices[q_idx]
-        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
-        keep = np.invert(remove)
+        keep = valid_gallery_mask(q_pid, q_camid, g_pids[order], g_camids[order])
 
         raw_cmc = matches[q_idx][keep]
         if not np.any(raw_cmc): continue
@@ -166,6 +162,8 @@ def main_worker(args):
 
     model = create_model(args)
     trial = args.trial
+    if trial != 1:
+        raise ValueError('Official LAGPeR scene split has one fixed trial (trial=1).')
     
     args.test_batch = args.batch_size
     args.img_w = args.width
@@ -177,7 +175,7 @@ def main_worker(args):
     
     print(f'==> Loading weights from: {checkpoint_path}')
     checkpoint = load_checkpoint(checkpoint_path)
-    model.load_state_dict(checkpoint['state_dict'])
+    load_agw_checkpoint_strict(model, checkpoint)
     model.eval()
 
     # ==========================================
@@ -186,11 +184,10 @@ def main_worker(args):
     print('\n' + '=' * 50)
     print('Testing Mode: Aerial (IR) to Ground (RGB) [a2g]')
     
-    query_img, query_label = process_test_regdb(data_path, trial=trial, modal='thermal')
-    gall_img, gall_label = process_test_regdb(data_path, trial=trial, modal='visible')
-    
-    q_camids = np.ones(len(query_label), dtype=np.int32) * 2
-    g_camids = np.ones(len(gall_label), dtype=np.int32) * 1
+    query_img, query_label, q_camids = process_test_lagper(
+        data_path, 'query', 'aerial')
+    gall_img, gall_label, g_camids = process_test_lagper(
+        data_path, 'gallery', 'ground')
 
     queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
     query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
@@ -212,11 +209,10 @@ def main_worker(args):
     print('\n' + '=' * 50)
     print('Testing Mode: Ground (RGB) to Aerial (IR) [g2a]')
     
-    query_img, query_label = process_test_regdb(data_path, trial=trial, modal='visible')
-    gall_img, gall_label = process_test_regdb(data_path, trial=trial, modal='thermal')
-    
-    q_camids = np.ones(len(query_label), dtype=np.int32) * 1
-    g_camids = np.ones(len(gall_label), dtype=np.int32) * 2
+    query_img, query_label, q_camids = process_test_lagper(
+        data_path, 'query', 'ground')
+    gall_img, gall_label, g_camids = process_test_lagper(
+        data_path, 'gallery', 'aerial')
 
     queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
     query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
@@ -238,9 +234,12 @@ def main_worker(args):
     print('\n' + '=' * 50)
     print('Testing Mode: Ground (RGB) to Aerial + Ground [g2a+g]')
     
-    query_img, query_label = process_test_regdb(data_path, trial=trial, modal='visible')
-    gall_a_img, gall_a_label = process_test_regdb(data_path, trial=trial, modal='thermal')
-    gall_g_img, gall_g_label = process_test_regdb(data_path, trial=trial, modal='visible')
+    query_img, query_label, q_camids = process_test_lagper(
+        data_path, 'query', 'ground')
+    gall_a_img, gall_a_label, gall_a_camids = process_test_lagper(
+        data_path, 'gallery', 'aerial')
+    gall_g_img, gall_g_label, gall_g_camids = process_test_lagper(
+        data_path, 'gallery', 'ground')
     
     # 提取 Query (RGB, modal=1)
     queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
@@ -261,12 +260,7 @@ def main_worker(args):
     gall_feat_fc = np.concatenate([gall_a_feat_fc, gall_g_feat_fc], axis=0)
     gall_label = np.concatenate([gall_a_label, gall_g_label])
     
-    # 设置 Camera IDs 防止评估时出现错误匹配
-    q_camids = np.ones(len(query_label), dtype=np.int32) * 1
-    g_camids = np.concatenate([
-        np.ones(len(gall_a_label), dtype=np.int32) * 2,
-        np.ones(len(gall_g_label), dtype=np.int32) * 1
-    ])
+    g_camids = np.concatenate([gall_a_camids, gall_g_camids])
     
     distmat = np.matmul(query_feat_fc, np.transpose(gall_feat_fc))
     cmc, mAP, mINP = eval_lagper(-distmat, query_label, gall_label, q_camids=q_camids, g_camids=g_camids)
@@ -278,7 +272,8 @@ def main_worker(args):
 
 def main():
     parser = argparse.ArgumentParser(description="LAG Test")
-    parser.add_argument('-a', '--arch', type=str, default='resnet50', choices=models.names())
+    parser.add_argument('-a', '--arch', type=str, default='agw', choices=['agw'],
+                        help='evaluation architecture (default: agw)')
     parser.add_argument('--features', type=int, default=0)
     parser.add_argument('--dropout', type=float, default=0)
     parser.add_argument('--pooling-type', type=str, default='gem')
@@ -286,6 +281,8 @@ def main():
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--data-dir', type=str, required=True)
     parser.add_argument('--checkpoint', type=str, required=True)
+    parser.add_argument('--pretrained-resnet50', type=str, default=None,
+                        help='baseline resnet50-19c8e357.pth; CLI overrides PCLHD_RESNET50_PRETRAINED')
     parser.add_argument('--height', type=int, default=288)
     parser.add_argument('--width', type=int, default=144)
     parser.add_argument('--trial', type=int, default=1)

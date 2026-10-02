@@ -1,6 +1,7 @@
 """Reliability-aware hard prototype selection with raw-cosine reliability."""
 
 import math
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -8,30 +9,61 @@ import torch
 import torch.nn.functional as F
 
 
-def _cosine_knn_indices(features, k, query_chunk=256, reference_chunk=4096):
+def _faiss_knn(vectors, k, query_chunk, use_gpu):
+    import faiss
+
+    cpu_index = faiss.IndexFlatIP(vectors.shape[1])
+    if use_gpu:
+        resources = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(resources, torch.cuda.current_device(), cpu_index)
+    else:
+        index = cpu_index
+    index.add(vectors)
+    result = torch.empty((vectors.shape[0], k), dtype=torch.long)
+    for start in range(0, vectors.shape[0], query_chunk):
+        stop = min(start + query_chunk, vectors.shape[0])
+        _, neighbors = index.search(vectors[start:stop], k + 1)
+        for offset, row in enumerate(neighbors):
+            own = start + offset
+            others = row[row != own][:k]
+            if len(others) != k:
+                raise RuntimeError("KNN search returned too few non-self neighbors")
+            result[own] = torch.from_numpy(others.copy())
+    return result
+
+
+def _cosine_knn_indices(features, k, query_chunk=256, reference_chunk=4096,
+                         backend='auto', return_backend=False):
     """Exact inner-product KNN without constructing an N x N matrix."""
     count = features.size(0)
     if k == 0:
-        return torch.empty((count, 0), dtype=torch.long)
+        result = torch.empty((count, 0), dtype=torch.long)
+        return (result, 'none') if return_backend else result
+    if backend not in ('auto', 'gpu_faiss', 'cpu_faiss', 'torch_chunk'):
+        raise ValueError("backend must be auto, gpu_faiss, cpu_faiss, or torch_chunk")
     try:
         import faiss
     except ImportError:
         faiss = None
-    if faiss is not None:
-        vectors = features.cpu().numpy().astype(np.float32, copy=False)
-        index = faiss.IndexFlatIP(vectors.shape[1])
-        index.add(vectors)
-        result = torch.empty((count, k), dtype=torch.long)
-        for start in range(0, count, query_chunk):
-            stop = min(start + query_chunk, count)
-            _, neighbors = index.search(vectors[start:stop], k + 1)
-            for offset, row in enumerate(neighbors):
-                own = start + offset
-                others = row[row != own][:k]
-                if len(others) != k:
-                    raise RuntimeError("KNN search returned too few non-self neighbors")
-                result[own] = torch.from_numpy(others.copy())
-        return result
+    vectors_np = np.ascontiguousarray(
+        features.detach().cpu().numpy(), dtype=np.float32)
+    gpu_available = (faiss is not None and torch.cuda.is_available()
+                     and hasattr(faiss, 'StandardGpuResources')
+                     and hasattr(faiss, 'index_cpu_to_gpu'))
+    if backend in ('auto', 'gpu_faiss') and gpu_available:
+        try:
+            result = _faiss_knn(vectors_np, k, query_chunk, use_gpu=True)
+            return (result, 'gpu_faiss') if return_backend else result
+        except Exception:
+            if backend == 'gpu_faiss':
+                raise
+    elif backend == 'gpu_faiss':
+        raise RuntimeError('GPU FAISS exact KNN is unavailable')
+    if backend in ('auto', 'cpu_faiss') and faiss is not None:
+        result = _faiss_knn(vectors_np, k, query_chunk, use_gpu=False)
+        return (result, 'cpu_faiss') if return_backend else result
+    if backend == 'cpu_faiss':
+        raise RuntimeError('CPU FAISS exact KNN is unavailable')
 
     result = torch.empty((count, k), dtype=torch.long)
     vectors = features.cpu()
@@ -54,12 +86,12 @@ def _cosine_knn_indices(features, k, query_chunk=256, reference_chunk=4096):
             best_scores, positions = merged_scores.topk(k, dim=1)
             best_indices = merged_indices.gather(1, positions)
         result[start:stop] = best_indices
-    return result
+    return (result, 'torch_chunk') if return_backend else result
 
 
 def compute_rahp_reliability(features, pseudo_labels, knn=20, alpha=0.5,
                              eps=1e-6, query_chunk=256, reference_chunk=4096,
-                             return_diagnostics=False):
+                             return_diagnostics=False, knn_backend='auto'):
     """Return q in full extracted-feature order; outlier entries are zero.
 
     Each invocation is one independent domain/label space. Only pseudo labels
@@ -76,7 +108,8 @@ def compute_rahp_reliability(features, pseudo_labels, knn=20, alpha=0.5,
     valid_count = int(valid.sum())
     diagnostics = {'enabled': True, 'num_valid_samples': valid_count,
                    'num_clusters': 0, 'mean_q_nbr': 0.0,
-                   'mean_q_margin': 0.0, 'mean_q': 0.0}
+                   'mean_q_margin': 0.0, 'mean_q': 0.0,
+                   'knn_backend': 'none', 'knn_k': 0, 'knn_time': 0.0}
     if not valid_count:
         return (q_full, diagnostics) if return_diagnostics else q_full
 
@@ -88,8 +121,13 @@ def compute_rahp_reliability(features, pseudo_labels, knn=20, alpha=0.5,
     diagnostics['num_clusters'] = int(cluster_count)
     neighbor_count = min(knn, valid_count - 1)
     if neighbor_count:
-        neighbor_indices = _cosine_knn_indices(
-            vectors, neighbor_count, query_chunk, reference_chunk)
+        started = time.perf_counter()
+        neighbor_indices, selected_backend = _cosine_knn_indices(
+            vectors, neighbor_count, query_chunk, reference_chunk,
+            backend=knn_backend, return_backend=True)
+        diagnostics.update(knn_backend=selected_backend,
+                           knn_k=neighbor_count,
+                           knn_time=time.perf_counter() - started)
         q_nbr = (valid_labels[neighbor_indices] == valid_labels[:, None]).float().mean(1)
     else:
         q_nbr = torch.ones(valid_count)
@@ -192,7 +230,7 @@ def format_rahp_epoch(reliability_diagnostics, selection_stats, enabled=True):
         return (sum(item[key] * item['num_valid_samples'] for item in records) / total
                 if total else 0.0)
     selected = selection_stats.summary() if selection_stats else RAHPSelectionStats().summary()
-    return ('[RAHP] enabled={} valid={} clusters={} q_nbr={:.4f} q_margin={:.4f} '
+    summary = ('[RAHP] enabled={} valid={} clusters={} q_nbr={:.4f} q_margin={:.4f} '
             'q={:.4f} candidates={:.2f} replacement={:.4f} baseline_q={:.4f} '
             'selected_q={:.4f} hard_percentile={:.4f}').format(
                 bool(enabled), total, clusters, weighted('mean_q_nbr'),
@@ -201,6 +239,13 @@ def format_rahp_epoch(reliability_diagnostics, selection_stats, enabled=True):
                 selected['baseline_hard_mean_reliability'],
                 selected['rahp_hard_mean_reliability'],
                 selected['selected_hard_percentile'])
+    knn_lines = [
+        '[RAHP-KNN] backend={} N={} K={} time={:.6f}'.format(
+            item.get('knn_backend', 'none'), item['num_valid_samples'],
+            item.get('knn_k', 0), item.get('knn_time', 0.0))
+        for item in records
+    ]
+    return summary + (('\n' + '\n'.join(knn_lines)) if knn_lines else '')
 
 
 def disabled_rahp_diagnostics(pseudo_labels):
@@ -208,4 +253,5 @@ def disabled_rahp_diagnostics(pseudo_labels):
     valid = labels[labels != -1]
     return {'enabled': False, 'num_valid_samples': int(valid.numel()),
             'num_clusters': int(torch.unique(valid).numel()),
-            'mean_q_nbr': 0.0, 'mean_q_margin': 0.0, 'mean_q': 0.0}
+            'mean_q_nbr': 0.0, 'mean_q_margin': 0.0, 'mean_q': 0.0,
+            'knn_backend': 'disabled', 'knn_k': 0, 'knn_time': 0.0}

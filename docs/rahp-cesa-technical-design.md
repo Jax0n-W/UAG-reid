@@ -2,7 +2,7 @@
 
 ## Repository audit and scope
 
-The starting tree contained only SYSU/RegDB. The user supplied `C:/Users/Jaxon/Desktop/fsdownload/PCLHD2` as the AG-ReID/LAGPeR reference. Its `train_agreid.py.bak_agva` and `train_lag_backup_before_agva.py` are the selected dual-domain training baselines; `clustercontrast/datasets/{agreid_ir,agreid_rgb,lag_ir,lag_rgb}.py`, `test_agreid.py`, `test_LAG.py`, and `prepare_lag.py` supply the existing dataset and evaluation rules. These files are copied into this tree without inventing train/query/gallery splits. The VI scripts remain the PCLHD ground-truth reference. The two new methods share one implementation each across both dataset entrypoints.
+The starting tree contained only SYSU/RegDB. The user supplied `C:/Users/Jaxon/Desktop/fsdownload/PCLHD2` as an implementation reference. Its LAG adapter did not contain the real seven-scene raw layout: the old `prepare_lag.py` converted AG-ReID and randomly split identities. That converter is now deprecated and fails fast. Formal LAGPeR code consumes only an already prepared official scene split through the contract below. The VI scripts remain the PCLHD reference. The two frozen methods share one implementation each across both dataset entrypoints.
 
 ## Existing data flow
 
@@ -25,6 +25,8 @@ For each batch pseudo-ID, `CM_Hybrid.backward` retains the old-slot similarity m
 
 Each AG/LAG trainer builds `q_filtered` in the same loop as each filtered pseudo-label table, then `clustercontrast/trainers.py` gathers it by the preprocessor indexes. A dual RGB view duplicates `q_batch` exactly when it duplicates labels. Domain and ALL tables each compute reliability using their own pseudo-label space; no ground-truth identity enters RAHP. A diagnostics accumulator records per-memory hard replacement, candidate count, reliability, and chosen hardness percentile, and emits one summary per epoch together with the KNN/margin statistics. Stage 1 applies RAHP to its domain memories when `--memorybank CMhybrid` is selected. Stage 2 forces `CMhard` for domain memories but its encoder branch still calls `cm_hybrid`; ALL uses `CMhybrid`. The EMA instance proxy remains outside RAHP.
 
+Exact raw-cosine KNN chooses backends in this order: GPU FAISS `IndexFlatIP`, CPU FAISS `IndexFlatIP`, then chunked Torch exact top-k. All paths remove self-neighbors and preserve the same K, metric and neighbor definition; none creates an N by N matrix. Each reliability space prints `[RAHP-KNN] backend=... N=... K=... time=...`.
+
 ## CESA shared API and algorithm
 
 `clustercontrast/methods/cesa.py` stores only previous aerial/ground label vectors, sparse matched-edge persistence and the next Stage 2 epoch index. The overlap contingency contains only observed pairs from aligned previous/current sample labels; `-1` is ignored in overlaps. Jaccard uses independently counted previous/current cluster sizes. A current cluster inherits a previous cluster only if both directions select one another as their unique highest-Jaccard match and Jaccard reaches the threshold. Ambiguous ties reset history, so a split or merge cannot copy one trajectory into multiple clusters.
@@ -39,29 +41,69 @@ Formal experiment checkpoint: **fixed final epoch**. Stage 1 and Stage 2 write `
 
 RAHP Stage 1 requires `--memorybank CMhybrid`. An explicit `--use-rahp` with Stage 1 and any other memory bank raises `ValueError`. `--stage2-only --use-rahp` remains valid because it skips Stage 1.
 
+## Architecture and pretrained checkpoint policy
+
+Training and final evaluation both instantiate `models.create('agw', ...)`. Evaluation loads `state_dict` with `strict=True`; missing or unexpected parameters raise `Checkpoint architecture does not match AGW evaluation model.` AG-ReID remains A to G and G to A. LAGPeR uses its three protocols described below.
+
+The unchanged baseline ImageNet file is `resnet50-19c8e357.pth`. Resolution order is `--pretrained-resnet50 PATH`, then `PCLHD_RESNET50_PRETRAINED`, then `examples/pretrained/resnet50-19c8e357.pth` relative to the repository. A missing file fails before model construction. The repository does not download or track this weight file.
+
+## Official LAGPeR prepared-data contract
+
+The repository does not have enough information to convert the raw seven-scene dataset. **BLOCKED: NEED REAL LAGPER DATA TREE** for a converter. `prepare_lag.py` is a deprecated guard and cannot generate formal data.
+
+An externally prepared official tree must contain:
+
+```text
+LAGPeR/
+  images/...
+  meta/
+    protocol.json
+    train_aerial.txt
+    train_ground.txt
+    query_aerial.txt
+    gallery_aerial.txt
+    query_ground.txt
+    gallery_ground.txt
+```
+
+`protocol.json` must declare dataset `LAGPeR`, protocol `official-scene-split`, four train scenes, three test scenes, 4/8 train aerial/ground cameras and 3/6 test aerial/ground cameras. Every manifest line is `image_path pid camid view`, with a path relative to the dataset root and view equal to `aerial` or `ground`. The loaders never create a split. Train PID is retained only as dataset metadata and is relabeled locally; DBSCAN still supplies every training pseudo label.
+
+Final LAGPeR evaluation constructs:
+
+- A to G: `query_aerial.txt` against `gallery_ground.txt`.
+- G to A: `query_ground.txt` against `gallery_aerial.txt`.
+- G to A+G: `query_ground.txt` against the concatenated aerial and ground galleries.
+
+PID and real camera ID are read from the same manifest record and concatenated together. Evaluation removes only gallery records for which both PID and real camera match the query. Filenames of the form `0001_c13_000008.jpg` can be audited as PID 1, camera 13; view type is never substituted for camera ID.
+
 ## CLI, ablations, and boundaries
 
 The shared CLI helper defines `--use-rahp`, `--rahp-beta` (0.25), `--rahp-knn` (20), `--rahp-alpha` (0.5), `--use-cesa`, `--cesa-rho` (0.8), `--cesa-eta` (0.1), `--cesa-lineage-thr` (0.5), and `--cesa-warmup` (5). It derives `baseline`, `rahp`, `cesa`, or `rahp_cesa` from the two flags. Both AG-ReID and LAGPeR RGB/RGB entrypoints omit `ChannelExchange`, `ChannelAdapGray`, and related VI channel simulation by default while retaining the established ordinary transforms. `agw` remains the only accepted architecture in these entrypoints and uses ResNet-50. DBSCAN, PGM unmatched completion, and evaluation protocols remain outside this method change.
 
-The AG-ReID data root follows the supplied adapter's `agreid_ir/aerial_modify/bounding_box_train` and `agreid_rgb/ground_modify/bounding_box_train` layout plus its existing test/index paths. LAGPeR uses `aerial_modify/<trial>/bounding_box_train` and `ground_modify/<trial>/bounding_box_train` beneath one dataset root plus its existing test/index paths. For comparable Stage 1 hard-proxy ablations, use `--memorybank CMhybrid` in every group:
+The AG-ReID data root follows the supplied adapter's existing layout. LAGPeR follows the prepared manifest contract above. The formal scripts freeze `batch-size=64` and `num-instances=16`, matching the supplied historical AG/LAG run scripts; the ground loader receives batch 32, which remains two complete 16-instance groups. Baseline, RAHP, CESA and Full share every non-method argument. Run them with:
+
+| Setting | Frozen value for AG-ReID and LAGPeR |
+| --- | --- |
+| architecture / memory / pooling | `agw` / `CMhybrid` / `gem` |
+| image size / batch / instances | `288x144` / `64` / `16` |
+| epochs / iterations / trial | `50` / `400` / `1` |
+| optimizer | lr `0.00035`, weight decay `0.0005`, momentum `0.2`, step `20` |
+| clustering CLI | eps `0.6`, eps gap `0.02`, k1 `30`, k2 `6` |
+| temperature / seed / workers | `0.05` / `1` / `8` |
+| RAHP | beta `0.25`, KNN `20`, alpha `0.5` |
+| CESA | rho `0.8`, eta `0.1`, lineage threshold `0.5`, warmup `5` |
+| evaluation during training | `False` |
 
 ```bash
-python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --eval-during-train=False
-python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --eval-during-train=False --use-rahp
-python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --eval-during-train=False --use-cesa
-python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --eval-during-train=False --use-rahp --use-cesa
-
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-rahp
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-cesa
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-rahp --use-cesa
+DATA_DIR=/path/to/AG-ReID-root LOGS_DIR=logs/agreid PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_agreid_ablation.sh
+DATA_DIR=/path/to/LAGPeR-root LOGS_DIR=logs/lagper PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_lagper_ablation.sh
 ```
 
 The standalone test scripts parameterize all paths and runtime loader settings. AG-ReID reports A to G and G to A. LAGPeR reports A to G, G to A, and G to A+G:
 
 ```bash
-python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_final.pth.tar --trial 1 --batch-size 64 --workers 8
-python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --trial 1 --batch-size 64 --workers 8
+python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
+python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
 ```
 
 ## Verification gates

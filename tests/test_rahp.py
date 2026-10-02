@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 
 from clustercontrast.methods.rahp import (
-    compute_rahp_reliability, gather_batch_reliability, select_rahp_hard,
+    _cosine_knn_indices, compute_rahp_reliability,
+    gather_batch_reliability, select_rahp_hard,
 )
 from clustercontrast.models.cm import cm_hybrid
 
@@ -95,6 +96,47 @@ class RAHPTests(unittest.TestCase):
         self.assertEqual(len(batch_features), len(batch_labels))
         self.assertEqual(len(batch_labels), len(q_batch))
         self.assertTrue(torch.equal(q_batch[:2], q_batch[2:]))
+
+    def test_exact_knn_backends_match_brute_force_cosine(self):
+        vectors = F.normalize(torch.tensor([
+            [1.0, 0.0, 0.1],
+            [0.8, 0.2, 0.0],
+            [0.1, 1.0, 0.0],
+            [-0.7, 0.1, 0.3],
+            [0.0, -0.8, 0.4],
+        ]), dim=1)
+        scores = vectors.mm(vectors.t())
+        scores.fill_diagonal_(-float('inf'))
+        expected = scores.topk(2, dim=1).indices
+        torch_result, torch_backend = _cosine_knn_indices(
+            vectors, 2, backend='torch_chunk', return_backend=True)
+        self.assertEqual(torch_backend, 'torch_chunk')
+        self.assertTrue(torch.equal(torch_result, expected))
+        try:
+            faiss_result, faiss_backend = _cosine_knn_indices(
+                vectors, 2, backend='cpu_faiss', return_backend=True)
+        except RuntimeError:
+            self.skipTest('CPU FAISS unavailable')
+        self.assertEqual(faiss_backend, 'cpu_faiss')
+        for actual, wanted in zip(faiss_result, expected):
+            self.assertEqual(set(actual.tolist()), set(wanted.tolist()))
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA unavailable')
+    def test_gpu_faiss_matches_brute_force_when_available(self):
+        vectors = F.normalize(torch.tensor([
+            [1.0, 0.0], [0.9, 0.2], [0.0, 1.0], [-0.8, 0.1],
+        ]), dim=1)
+        expected_scores = vectors.mm(vectors.t())
+        expected_scores.fill_diagonal_(-float('inf'))
+        expected = expected_scores.topk(2, dim=1).indices
+        try:
+            actual, backend = _cosine_knn_indices(
+                vectors, 2, backend='gpu_faiss', return_backend=True)
+        except RuntimeError:
+            self.skipTest('GPU FAISS unavailable')
+        self.assertEqual(backend, 'gpu_faiss')
+        for row, wanted in zip(actual, expected):
+            self.assertEqual(set(row.tolist()), set(wanted.tolist()))
 
 
 if __name__ == '__main__':

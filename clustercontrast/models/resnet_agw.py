@@ -2,16 +2,34 @@ import torch.nn as nn
 import math
 import torch.utils.model_zoo as model_zoo
 import torch
+import os
+import os.path as osp
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
            'resnet152']
+
+_REPOSITORY_ROOT = osp.abspath(osp.join(osp.dirname(__file__), '..', '..'))
+_DEFAULT_RESNET50 = osp.join(
+  _REPOSITORY_ROOT, 'examples', 'pretrained', 'resnet50-19c8e357.pth')
 
 model_urls = {
   'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
   'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
-  'resnet50': './examples/pretrained/resnet50-19c8e357.pth',
+  'resnet50': _DEFAULT_RESNET50,
   'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
   'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
 }
+
+
+def resolve_resnet50_pretrained(cli_path=None):
+  """Resolve CLI -> environment -> repository-relative baseline weights."""
+  path = cli_path or os.environ.get('PCLHD_RESNET50_PRETRAINED') or model_urls['resnet50']
+  path = osp.abspath(osp.expanduser(path))
+  if not osp.isfile(path):
+    raise FileNotFoundError(
+      'ResNet-50 pretrained checkpoint not found. Provide '
+      '--pretrained-resnet50 PATH or set PCLHD_RESNET50_PRETRAINED. '
+      'Resolved path: {}'.format(path))
+  return path
 
 
 def conv3x3(in_planes, out_planes, stride=1, dilation=1):
@@ -178,15 +196,16 @@ def resnet34(pretrained=False, **kwargs):
   return model
 
 
-def resnet50(pretrained=False, **kwargs):
+def resnet50(pretrained=False, pretrained_path=None, **kwargs):
   """Constructs a ResNet-50 model.
   Args:
       pretrained (bool): If True, returns a model pre-trained on ImageNet
   """
   model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
   if pretrained:
-    # model.load_state_dict(remove_fc(model_zoo.load_url(model_urls['resnet50'])))
-    model.load_state_dict(remove_fc(torch.load(model_urls['resnet50'])))
+    path = resolve_resnet50_pretrained(pretrained_path)
+    state = torch.load(path, map_location='cpu')
+    model.load_state_dict(remove_fc(state))
   return model
 
 
