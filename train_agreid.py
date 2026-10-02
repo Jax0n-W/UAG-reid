@@ -139,6 +139,9 @@ def get_train_loader_ir(args, dataset, height, width, batch_size, workers,
 
 
     train_set = sorted(dataset.train) if trainset is None else sorted(trainset)
+    if not train_set:
+        raise RuntimeError(
+            'Cannot build IR training loader from an empty pseudo-labeled set')
     rmgs_flag = num_instances > 0
     if rmgs_flag:
         if no_cam:
@@ -147,10 +150,15 @@ def get_train_loader_ir(args, dataset, height, width, batch_size, workers,
             sampler = RandomMultipleGallerySampler(train_set, num_instances)
     else:
         sampler = None
+    sampler_size = len(sampler) if sampler is not None else len(train_set)
+    drop_last = sampler_size >= batch_size
+    if not drop_last:
+        print('[LOADER] IR partial batch: sampler_size={} batch_size={}'.format(
+            sampler_size, batch_size))
     train_loader = IterLoader(
         DataLoader(Preprocessor(train_set, root=dataset.images_dir, transform=train_transformer),
                    batch_size=batch_size, num_workers=workers, sampler=sampler,
-                   shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+                   shuffle=not rmgs_flag, pin_memory=True, drop_last=drop_last), length=iters)
 
     return train_loader
 
@@ -160,6 +168,9 @@ def get_train_loader_color(args, dataset, height, width, batch_size, workers,
 
 
     train_set = sorted(dataset.train) if trainset is None else sorted(trainset)
+    if not train_set:
+        raise RuntimeError(
+            'Cannot build RGB training loader from an empty pseudo-labeled set')
     rmgs_flag = num_instances > 0
     if rmgs_flag:
         if no_cam:
@@ -168,16 +179,21 @@ def get_train_loader_color(args, dataset, height, width, batch_size, workers,
             sampler = RandomMultipleGallerySampler(train_set, num_instances)
     else:
         sampler = None
+    sampler_size = len(sampler) if sampler is not None else len(train_set)
+    drop_last = sampler_size >= batch_size
+    if not drop_last:
+        print('[LOADER] RGB partial batch: sampler_size={} batch_size={}'.format(
+            sampler_size, batch_size))
     if train_transformer1 is None:
         train_loader = IterLoader(
             DataLoader(Preprocessor(train_set, root=dataset.images_dir, transform=train_transformer),
                        batch_size=batch_size, num_workers=workers, sampler=sampler,
-                       shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+                       shuffle=not rmgs_flag, pin_memory=True, drop_last=drop_last), length=iters)
     else:
         train_loader = IterLoader(
             DataLoader(Preprocessor_color(train_set, root=dataset.images_dir, transform=train_transformer,transform1=train_transformer1),
                        batch_size=batch_size, num_workers=workers, sampler=sampler,
-                       shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+                       shuffle=not rmgs_flag, pin_memory=True, drop_last=drop_last), length=iters)
 
     return train_loader
 
@@ -380,33 +396,23 @@ def eval_regdb(distmat, q_pids, g_pids, max_rank = 20):
     mINP = np.mean(all_INP)
     return all_cmc, mAP, mINP
 
-def associated_analysis_for_all(all_origin, all_pred, image_paths_for_all, log_dir):
-    label_count_all = -1
-    all_label_set = list(set(all_pred))
-    all_label_set.sort()
-    class_NIRVIS_list_modal_all = []
+def associated_analysis_for_all(all_origin, num_ground_samples, log_dir):
+    del log_dir
+    all_label_set = sorted(label for label in set(all_origin) if label != -1)
     associate = 0
-    flag_ir_list = collections.defaultdict(list)
-    flag_rgb_list = collections.defaultdict(list)
-    for idx_, lab_ in enumerate(all_label_set):
-        label_count_all += 1
-        class_NIRVIS_list_modal = []
-        flag_ir = 0
-        flag_rgb = 0
-        for idx, lab in enumerate(all_pred):
-            if lab_ == lab:
-                if 'aerial_modify' in image_paths_for_all[idx]:
-                    flag_ir = 1
-                    flag_ir_list[idx_] = 1
-                elif 'ground_modify' in image_paths_for_all[idx]:
-                    flag_rgb = 1
-                    flag_rgb_list[idx_] = 1
-        class_NIRVIS_list_modal_all.extend([class_NIRVIS_list_modal])
+    flag_ir_list = collections.defaultdict(int)
+    flag_rgb_list = collections.defaultdict(int)
+    for label in all_label_set:
+        indexes = np.flatnonzero(all_origin == label)
+        has_ground = bool(np.any(indexes < num_ground_samples))
+        has_aerial = bool(np.any(indexes >= num_ground_samples))
+        flag_rgb_list[int(label)] = int(has_ground)
+        flag_ir_list[int(label)] = int(has_aerial)
+        if has_ground and has_aerial:
+            associate += 1
 
-        if flag_ir == 1 and flag_rgb == 1:
-            associate = associate + 1
-
-    print('associate rate', associate / len(all_label_set))
+    associate_rate = associate / len(all_label_set) if all_label_set else 0.0
+    print('associate rate', associate_rate)
 
     return flag_ir_list, flag_rgb_list
 
@@ -1109,36 +1115,36 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
 
         print('==> Statistics for RGB epoch {}: {} clusters'.format(epoch, num_cluster_rgb))
 
-        all_label = []
-        all_file_name = []
-        for i, ((fname, _, cid), label) in enumerate(
-                zip(sorted(dataset_rgb.train) + sorted(dataset_ir.train), pseudo_labels_all)):
-            if label != -1:
-                all_file_name.append(fname)
-                all_label.append(label.item())
-
-        flag_ir_list, flag_rgb_list = associated_analysis_for_all(pseudo_labels_all, all_label, all_file_name,
-                                                                  args.logs_dir)
+        ground_count = len(dataset_rgb.train)
+        flag_ir_list, flag_rgb_list = associated_analysis_for_all(
+            pseudo_labels_all, ground_count, args.logs_dir)
         print('==> Statistics for ALL epoch {}: {} clusters'.format(epoch, num_cluster_all))
 
-        all_label = []
         pseudo_labeled_dataset_all_ir = []
         pseudo_labeled_dataset_all_rgb = []
         q_all_ir_filtered = []
         q_all_rgb_filtered = []
         for i, ((fname, _, cid), label) in enumerate(
                 zip(sorted(dataset_rgb.train) + sorted(dataset_ir.train), pseudo_labels_all)):
-            if label != -1:
-                all_file_name.append(fname)
-                all_label.append(label.item())
-            if (not args.use_rahp or label != -1) and 'aerial_modify' in fname and flag_ir_list[label] == 1 and flag_rgb_list[label] == 1:
+            if label == -1:
+                continue
+            if (i >= ground_count and flag_ir_list[label] == 1 and
+                    flag_rgb_list[label] == 1):
                 pseudo_labeled_dataset_all_ir.append((fname, label.item(), cid))
                 if args.use_rahp:
                     q_all_ir_filtered.append(q_all_full[i])
-            elif (not args.use_rahp or label != -1) and 'ground_modify' in fname and flag_ir_list[label] == 1 and flag_rgb_list[label] == 1:
+            elif (i < ground_count and flag_ir_list[label] == 1 and
+                  flag_rgb_list[label] == 1):
                 pseudo_labeled_dataset_all_rgb.append((fname, label.item(), cid))
                 if args.use_rahp:
                     q_all_rgb_filtered.append(q_all_full[i])
+
+        print('[ALL-LOADER] aerial_samples={} ground_samples={} '
+              'aerial_ids={} ground_ids={}'.format(
+                  len(pseudo_labeled_dataset_all_ir),
+                  len(pseudo_labeled_dataset_all_rgb),
+                  len(set(item[1] for item in pseudo_labeled_dataset_all_ir)),
+                  len(set(item[1] for item in pseudo_labeled_dataset_all_rgb))))
 
         ######################## PGM
         print("Start Bipartite Graph Matching")

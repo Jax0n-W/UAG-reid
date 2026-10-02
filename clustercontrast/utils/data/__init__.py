@@ -22,6 +22,12 @@ class IterLoader:
     def next(self):
         try:
             return next(self.iter)
-        except:
+        except StopIteration:
             self.iter = iter(self.loader)
-            return next(self.iter)
+            try:
+                return next(self.iter)
+            except StopIteration as error:
+                raise RuntimeError(
+                    'IterLoader source produced no batches. Check the '
+                    'pseudo-labeled sample count, sampler size, batch size, '
+                    'and drop_last setting.') from error

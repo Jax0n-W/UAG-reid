@@ -78,6 +78,9 @@ class channel_select(object):
 def get_train_loader_ir(args, dataset, height, width, batch_size, workers,
                          num_instances, iters, trainset=None, no_cam=False, train_transformer=None):
     train_set = sorted(dataset.train) if trainset is None else sorted(trainset)
+    if not train_set:
+        raise RuntimeError(
+            'Cannot build IR training loader from an empty pseudo-labeled set')
     rmgs_flag = num_instances > 0
     if rmgs_flag:
         if no_cam:
@@ -86,10 +89,15 @@ def get_train_loader_ir(args, dataset, height, width, batch_size, workers,
             sampler = RandomMultipleGallerySampler(train_set, num_instances)
     else:
         sampler = None
+    sampler_size = len(sampler) if sampler is not None else len(train_set)
+    drop_last = sampler_size >= batch_size
+    if not drop_last:
+        print('[LOADER] IR partial batch: sampler_size={} batch_size={}'.format(
+            sampler_size, batch_size))
     train_loader = IterLoader(
         DataLoader(Preprocessor(train_set, root=dataset.images_dir, transform=train_transformer),
                    batch_size=batch_size, num_workers=workers, sampler=sampler,
-                   shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+                   shuffle=not rmgs_flag, pin_memory=True, drop_last=drop_last), length=iters)
     return train_loader
 
 
@@ -97,6 +105,9 @@ def get_train_loader_color(args, dataset, height, width, batch_size, workers,
                             num_instances, iters, trainset=None, no_cam=False,
                             train_transformer=None, train_transformer1=None):
     train_set = sorted(dataset.train) if trainset is None else sorted(trainset)
+    if not train_set:
+        raise RuntimeError(
+            'Cannot build RGB training loader from an empty pseudo-labeled set')
     rmgs_flag = num_instances > 0
     if rmgs_flag:
         if no_cam:
@@ -105,17 +116,22 @@ def get_train_loader_color(args, dataset, height, width, batch_size, workers,
             sampler = RandomMultipleGallerySampler(train_set, num_instances)
     else:
         sampler = None
+    sampler_size = len(sampler) if sampler is not None else len(train_set)
+    drop_last = sampler_size >= batch_size
+    if not drop_last:
+        print('[LOADER] RGB partial batch: sampler_size={} batch_size={}'.format(
+            sampler_size, batch_size))
     if train_transformer1 is None:
         train_loader = IterLoader(
             DataLoader(Preprocessor(train_set, root=dataset.images_dir, transform=train_transformer),
                        batch_size=batch_size, num_workers=workers, sampler=sampler,
-                       shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+                       shuffle=not rmgs_flag, pin_memory=True, drop_last=drop_last), length=iters)
     else:
         train_loader = IterLoader(
             DataLoader(Preprocessor_color(train_set, root=dataset.images_dir,
                                           transform=train_transformer, transform1=train_transformer1),
                        batch_size=batch_size, num_workers=workers, sampler=sampler,
-                       shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+                       shuffle=not rmgs_flag, pin_memory=True, drop_last=drop_last), length=iters)
     return train_loader
 
 
