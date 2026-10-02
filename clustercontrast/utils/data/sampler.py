@@ -45,7 +45,7 @@ class RandomIdentitySampler(Sampler):
 
 class RandomMultipleGallerySampler(Sampler):
     def __init__(self, data_source, num_instances=4):
-        super().__init__(data_source)
+        super().__init__()
         self.data_source = data_source
         self.index_pid = defaultdict(int)
         self.pid_cam = defaultdict(list)
@@ -94,6 +94,7 @@ class RandomMultipleGallerySampler(Sampler):
             else:
                 select_indexes = No_index(index, i)
                 if not select_indexes:
+                    ret.extend([i] * (self.num_instances - 1))
                     continue
                 if len(select_indexes) >= self.num_instances:
                     ind_indexes = np.random.choice(select_indexes, size=self.num_instances-1, replace=False)
@@ -108,7 +109,7 @@ class RandomMultipleGallerySampler(Sampler):
 
 class RandomMultipleGallerySamplerNoCam(Sampler):
     def __init__(self, data_source, num_instances=4):
-        super().__init__(data_source)
+        super().__init__()
 
         self.data_source = data_source
         self.index_pid = defaultdict(int)
@@ -142,6 +143,7 @@ class RandomMultipleGallerySamplerNoCam(Sampler):
 
             select_indexes = No_index(index, i)
             if not select_indexes:
+                ret.extend([i] * (self.num_instances - 1))
                 continue
             if len(select_indexes) >= self.num_instances:
                 ind_indexes = np.random.choice(select_indexes, size=self.num_instances-1, replace=False)
