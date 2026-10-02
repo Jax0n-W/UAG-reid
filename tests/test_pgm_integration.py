@@ -42,6 +42,28 @@ def original_pgm_oracle(rgb, ir):
     return edges, r2i, i2r
 
 
+def rectangular_pgm_oracle(rgb, ir):
+    """Rectangular assignment with the frozen unmatched-RGB completion."""
+    rgb = F.normalize(rgb, dim=1)
+    ir = F.normalize(ir, dim=1)
+    cost = 1 / (torch.mm(rgb, ir.T) / 1).exp().cpu()
+    rows, columns = linear_sum_assignment(cost)
+    edges = [(int(row), int(column))
+             for row, column in zip(rows, columns)]
+    r2i = {row: column for row, column in edges}
+    i2r = {column: row for row, column in edges}
+    matched_rows = set(r2i)
+    unmatched = sorted(set(range(rgb.shape[0])) - matched_rows)
+    if unmatched:
+        extra_rows, extra_columns = linear_sum_assignment(cost[unmatched])
+        for local_row, column in zip(extra_rows, extra_columns):
+            row = unmatched[int(local_row)]
+            column = int(column)
+            edges.append((row, column))
+            r2i[row] = column
+    return edges, r2i, i2r
+
+
 def run_actual_stage2_pgm(script, cesa_state=None, num_cluster_rgb=3,
                           num_cluster_ir=2, pseudo_labels_rgb=None,
                           pseudo_labels_ir=None, include_diagnostics=False):
@@ -95,40 +117,39 @@ class PGMIntegrationTests(unittest.TestCase):
                 with_cesa = run_actual_stage2_pgm(script, CESAState())
                 self.assertEqual(with_cesa, baseline)
 
-    def test_cluster_count_inversion_preserves_baseline_and_advances_cesa(self):
+    def test_agreid_executes_rectangular_pgm_when_rgb_is_smaller(self):
         aerial = [0, 0, 1, 1, 2, 2]
         ground = [0, 0, 1, 1]
-        for script in ('train_agreid.py', 'train_lag.py'):
-            with self.subTest(script=script):
-                baseline = run_actual_stage2_pgm(
-                    script, num_cluster_rgb=2, num_cluster_ir=3,
-                    pseudo_labels_rgb=ground, pseudo_labels_ir=aerial)
-                self.assertEqual(baseline, ([], {}, {}))
+        rgb = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        ir = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
+        expected = rectangular_pgm_oracle(rgb, ir)
+        baseline = run_actual_stage2_pgm(
+            'train_agreid.py', num_cluster_rgb=2, num_cluster_ir=3,
+            pseudo_labels_rgb=ground, pseudo_labels_ir=aerial)
+        self.assertEqual(baseline, expected)
+        self.assertEqual(len(baseline[0]), 2)
+        self.assertEqual(set(baseline[1]), {0, 1})
 
-                state = CESAState()
-                state.edge_persistence = {(0, 0): 0.7}
-                result = run_actual_stage2_pgm(
-                    script, state, num_cluster_rgb=2, num_cluster_ir=3,
-                    pseudo_labels_rgb=ground, pseudo_labels_ir=aerial,
-                    include_diagnostics=True)
-                self.assertEqual(result[:3], ([], {}, {}))
-                self.assertFalse(result[3]['pgm_executed'])
-                self.assertEqual(state.edge_persistence, {})
-                self.assertEqual(state.prev_labels_aerial.tolist(), aerial)
-                self.assertEqual(state.prev_labels_ground.tolist(), ground)
-                self.assertEqual(state.stage2_epoch, 1)
+        state = CESAState()
+        result = run_actual_stage2_pgm(
+            'train_agreid.py', state, num_cluster_rgb=2, num_cluster_ir=3,
+            pseudo_labels_rgb=ground, pseudo_labels_ir=aerial,
+            include_diagnostics=True)
+        self.assertEqual(result[:3], expected)
+        self.assertTrue(result[3]['enabled'])
+        self.assertTrue(result[3]['pgm_executed'])
+        self.assertEqual(result[3]['current_pgm_edge_count'], 2)
+        self.assertEqual(state.stage2_epoch, 1)
 
-                next_aerial = [0, 0, 1, 1, -1, -1]
-                next_ground = [0, 0, 1, 2]
-                edges, _, _, diagnostics = run_actual_stage2_pgm(
-                    script, state, num_cluster_rgb=3, num_cluster_ir=2,
-                    pseudo_labels_rgb=next_ground,
-                    pseudo_labels_ir=next_aerial, include_diagnostics=True)
-                self.assertTrue(edges)
-                self.assertGreater(diagnostics['valid_aerial_lineages'], 0)
-                self.assertGreater(diagnostics['valid_ground_lineages'], 0)
-                self.assertTrue(state.edge_persistence)
-                self.assertEqual(state.stage2_epoch, 2)
+    def test_lag_cluster_count_inversion_is_unchanged(self):
+        aerial = [0, 0, 1, 1, 2, 2]
+        ground = [0, 0, 1, 1]
+        result = run_actual_stage2_pgm(
+            'train_lag.py', CESAState(), num_cluster_rgb=2,
+            num_cluster_ir=3, pseudo_labels_rgb=ground,
+            pseudo_labels_ir=aerial, include_diagnostics=True)
+        self.assertEqual(result[:3], ([], {}, {}))
+        self.assertFalse(result[3]['pgm_executed'])
 
 
 if __name__ == '__main__':

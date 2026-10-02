@@ -1152,7 +1152,7 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
         r2i = {}
         R = []
         bgm = False
-        pgm_executed = num_cluster_rgb >= num_cluster_ir
+        pgm_executed = num_cluster_rgb > 0 and num_cluster_ir > 0
         if pgm_executed:
             # clusternorm
             cluster_features_rgb = F.normalize(cluster_features_rgb, dim=1)
@@ -1168,23 +1168,31 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
             similarity = calibrated_score.exp().cpu()
             dis_similarity = (1 / (similarity))
             cost = dis_similarity / 1
-            tmp = torch.zeros(dis_similarity.shape[0], dis_similarity.shape[0] - dis_similarity.shape[1])
-            cost = (torch.cat((cost, tmp), 1))
-            unmatched_row = []
+            # scipy solves rectangular assignments directly.  This chooses
+            # min(num_rgb, num_ir) one-to-one edges in either orientation.
             row_ind, col_ind = linear_sum_assignment(cost)
-            for idx, item in enumerate(row_ind):
-                if col_ind[idx] < similarity.shape[1]:
-                    R.append((row_ind[idx], col_ind[idx]))
-                    r2i[row_ind[idx]] = col_ind[idx]
-                    i2r[col_ind[idx]] = row_ind[idx]
-                else:
-                    unmatched_row.append(row_ind[idx])
-            if bgm is False:
-                unmatched_cost = cost[unmatched_row][:, :dis_similarity.shape[1]]
+            matched_rows = set()
+            for row, column in zip(row_ind, col_ind):
+                row = int(row)
+                column = int(column)
+                matched_rows.add(row)
+                R.append((row, column))
+                r2i[row] = column
+                i2r[column] = row
+
+            # Preserve the frozen unmatched-ground completion for the
+            # num_rgb > num_ir case.  When num_rgb <= num_ir this is empty.
+            unmatched_row = sorted(
+                set(range(dis_similarity.shape[0])) - matched_rows)
+            if bgm is False and unmatched_row:
+                unmatched_cost = cost[unmatched_row]
                 unmatched_row_ind, unmatched_col_ind = linear_sum_assignment(unmatched_cost)
-                for idx, item in enumerate(unmatched_row_ind):
-                    R.append((unmatched_row[idx], unmatched_col_ind[idx]))
-                    r2i[unmatched_row[idx]] = unmatched_col_ind[idx]
+                for local_row, column in zip(
+                        unmatched_row_ind, unmatched_col_ind):
+                    row = int(unmatched_row[int(local_row)])
+                    column = int(column)
+                    R.append((row, column))
+                    r2i[row] = column
             del cluster_features_ir, cluster_features_rgb
 
         print("Finish Bipartite Graph Matching")
