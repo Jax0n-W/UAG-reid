@@ -4,6 +4,7 @@ import torch.utils.model_zoo as model_zoo
 import torch
 import os
 import os.path as osp
+from ..utils.serialization import load_torch_file
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
            'resnet152']
 
@@ -204,7 +205,7 @@ def resnet50(pretrained=False, pretrained_path=None, **kwargs):
   model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
   if pretrained:
     path = resolve_resnet50_pretrained(pretrained_path)
-    state = torch.load(path, map_location='cpu')
+    state = load_torch_file(path, map_location='cpu')
     model.load_state_dict(remove_fc(state))
   return model
 

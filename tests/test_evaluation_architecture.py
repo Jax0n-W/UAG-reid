@@ -15,6 +15,7 @@ from clustercontrast.methods.evaluation import load_agw_checkpoint_strict
 from clustercontrast.models.resnet_agw import (
     resolve_resnet50_pretrained, resnet50,
 )
+from clustercontrast.utils.serialization import load_torch_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +51,7 @@ class EvaluationArchitectureTests(unittest.TestCase):
                 'agw', num_features=0, norm=True, dropout=0,
                 num_classes=0, pooling_type='gem',
                 pretrained_path=str(pretrained)))
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            checkpoint = load_torch_file(checkpoint_path, map_location='cpu')
             load_agw_checkpoint_strict(evaluation_model, checkpoint)
 
             incompatible = dict(checkpoint['state_dict'])
@@ -76,6 +77,22 @@ class EvaluationArchitectureTests(unittest.TestCase):
             with self.assertRaisesRegex(
                     FileNotFoundError, 'Provide --pretrained-resnet50'):
                 resolve_resnet50_pretrained(str(Path(directory) / 'missing.pth'))
+
+    def test_trusted_legacy_torch_load_is_explicit_and_backward_compatible(self):
+        sentinel = object()
+        with mock.patch(
+                'clustercontrast.utils.serialization.torch.load',
+                return_value=sentinel) as torch_load:
+            self.assertIs(load_torch_file('legacy.pth'), sentinel)
+            torch_load.assert_called_once_with(
+                'legacy.pth', map_location='cpu', weights_only=False)
+
+        with mock.patch(
+                'clustercontrast.utils.serialization.torch.load',
+                side_effect=[TypeError('unsupported'), sentinel]) as torch_load:
+            self.assertIs(load_torch_file('legacy.pth'), sentinel)
+            self.assertEqual(torch_load.call_count, 2)
+            self.assertNotIn('weights_only', torch_load.call_args_list[1].kwargs)
 
 
 if __name__ == '__main__':

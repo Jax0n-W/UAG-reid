@@ -9,6 +9,16 @@ from torch.nn import Parameter
 from .osutils import mkdir_if_missing
 
 
+def load_torch_file(fpath, map_location='cpu'):
+    """Load a trusted local PyTorch file across pre/post 2.6 releases."""
+    try:
+        return torch.load(
+            fpath, map_location=map_location, weights_only=False)
+    except TypeError:
+        # PyTorch versions before weights_only was introduced.
+        return torch.load(fpath, map_location=map_location)
+
+
 def read_json(fpath):
     with open(fpath, 'r') as f:
         obj = json.load(f)
@@ -30,8 +40,7 @@ def save_checkpoint(state, is_best, fpath='checkpoint.pth.tar'):
 
 def load_checkpoint(fpath):
     if osp.isfile(fpath):
-        # checkpoint = torch.load(fpath)
-        checkpoint = torch.load(fpath, map_location=torch.device('cpu'))
+        checkpoint = load_torch_file(fpath, map_location=torch.device('cpu'))
         print("=> Loaded checkpoint '{}'".format(fpath))
         return checkpoint
     else:
