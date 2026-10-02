@@ -80,7 +80,12 @@ PID and real camera ID are read from the same manifest record and concatenated t
 
 The shared CLI helper defines `--use-rahp`, `--rahp-beta` (0.25), `--rahp-knn` (20), `--rahp-alpha` (0.5), `--use-cesa`, `--cesa-rho` (0.8), `--cesa-eta` (0.1), `--cesa-lineage-thr` (0.5), and `--cesa-warmup` (5). It derives `baseline`, `rahp`, `cesa`, or `rahp_cesa` from the two flags. Both AG-ReID and LAGPeR RGB/RGB entrypoints omit `ChannelExchange`, `ChannelAdapGray`, and related VI channel simulation by default while retaining the established ordinary transforms. `agw` remains the only accepted architecture in these entrypoints and uses ResNet-50. DBSCAN, PGM unmatched completion, and evaluation protocols remain outside this method change.
 
-The AG-ReID data root follows the supplied adapter's existing layout. LAGPeR follows the prepared manifest contract above. The formal scripts freeze `batch-size=64` and `num-instances=16`, matching the supplied historical AG/LAG run scripts; the ground loader receives batch 32, which remains two complete 16-instance groups. Baseline, RAHP, CESA and Full share every non-method argument. Run them with:
+The AG-ReID data root is shared by both modalities. Training reads
+`aerial_modify/{trial}/bounding_box_train` and
+`ground_modify/{trial}/bounding_box_train`; formal evaluation reads
+`idx/test_aerial_{trial}.txt` and `idx/test_ground_{trial}.txt`. The caller
+passes this shared root directly, without an `agreid_ir` or `agreid_rgb`
+suffix. LAGPeR follows the prepared manifest contract above. The formal scripts freeze `batch-size=64` and `num-instances=16`, matching the supplied historical AG/LAG run scripts; the ground loader receives batch 32, which remains two complete 16-instance groups. Baseline, RAHP, CESA and Full share every non-method argument. Run them with:
 
 | Setting | Frozen value for AG-ReID and LAGPeR |
 | --- | --- |

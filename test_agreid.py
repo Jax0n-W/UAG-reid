@@ -102,11 +102,13 @@ def extract_query_feat(model, query_loader, nquery):
     print('Extracting Time:\t {:.3f}'.format(time.time()-start))
     return query_feat_fc
 
-def process_test_regdb(img_dir, trial=1, modal='visible'):
-    if modal == 'visible':
-        input_data_path = osp.join(img_dir, 'idx', 'test_visible_{}.txt'.format(trial))
-    elif modal == 'thermal':
-        input_data_path = osp.join(img_dir, 'idx', 'test_thermal_{}.txt'.format(trial))
+def process_test_agreid(img_dir, trial=1, modal='ground'):
+    if modal == 'ground':
+        input_data_path = osp.join(img_dir, 'idx', 'test_ground_{}.txt'.format(trial))
+    elif modal == 'aerial':
+        input_data_path = osp.join(img_dir, 'idx', 'test_aerial_{}.txt'.format(trial))
+    else:
+        raise ValueError("AG-ReID modal must be 'ground' or 'aerial'")
     
     with open(input_data_path) as f:
         data_file_list = f.read().splitlines()
@@ -188,8 +190,8 @@ def main_worker(args):
     print('\n' + '=' * 50)
     print('Testing Mode: Aerial (IR) to Ground (RGB) [a2g]')
     
-    query_img, query_label = process_test_regdb(data_path, trial=trial, modal='thermal')
-    gall_img, gall_label = process_test_regdb(data_path, trial=trial, modal='visible')
+    query_img, query_label = process_test_agreid(data_path, trial=trial, modal='aerial')
+    gall_img, gall_label = process_test_agreid(data_path, trial=trial, modal='ground')
 
     queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
     query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
@@ -212,8 +214,8 @@ def main_worker(args):
     print('\n' + '=' * 50)
     print('Testing Mode: Ground (RGB) to Aerial (IR) [g2a]')
     
-    query_img, query_label = process_test_regdb(data_path, trial=trial, modal='visible')
-    gall_img, gall_label = process_test_regdb(data_path, trial=trial, modal='thermal')
+    query_img, query_label = process_test_agreid(data_path, trial=trial, modal='ground')
+    gall_img, gall_label = process_test_agreid(data_path, trial=trial, modal='aerial')
 
     queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
     query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)

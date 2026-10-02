@@ -51,8 +51,9 @@ from ChannelAug import ChannelAdap, ChannelAdapGray, ChannelRandomErasing,Channe
 from collections import Counter
 from scipy.optimize import linear_sum_assignment
 def get_data(name, data_dir,trial=0):
-    root = osp.join(data_dir, name)
-    dataset = datasets.create(name, root,trial=trial)
+    # Both AG-ReID modalities share one root.  The modality and trial are
+    # selected inside agreid_ir/agreid_rgb, matching the server data tree.
+    dataset = datasets.create(name, data_dir, trial=trial)
     return dataset
 
 def map_to_agva_path(fname, original_root, agva_root):
@@ -298,11 +299,13 @@ def extract_query_feat(model,query_loader,nquery):
     return query_feat_fc
 
 
-def process_test_regdb(img_dir, trial = 1, modal = 'visible'):
-    if modal=='visible':
-        input_data_path = osp.join(img_dir, 'idx/test_visible_{}.txt'.format(trial))
-    elif modal=='thermal':
-        input_data_path = osp.join(img_dir, 'idx/test_thermal_{}.txt'.format(trial))
+def process_test_agreid(img_dir, trial=1, modal='ground'):
+    if modal == 'ground':
+        input_data_path = osp.join(img_dir, 'idx/test_ground_{}.txt'.format(trial))
+    elif modal == 'aerial':
+        input_data_path = osp.join(img_dir, 'idx/test_aerial_{}.txt'.format(trial))
+    else:
+        raise ValueError("AG-ReID modal must be 'ground' or 'aerial'")
     
     with open(input_data_path) as f:
         data_file_list = open(input_data_path, 'rt').read().splitlines()
@@ -766,8 +769,8 @@ def main_worker_stage1(args,log_s1_name):
             mode='all'
             data_path=data_dir
             # AG-ReID: visible (ground/C03) -> query, thermal (aerial/C00) -> gallery
-            query_img, query_label = process_test_regdb(data_path, trial=trial, modal='visible')
-            gall_img, gall_label = process_test_regdb(data_path, trial=trial, modal='thermal')
+            query_img, query_label = process_test_agreid(data_path, trial=trial, modal='ground')
+            gall_img, gall_label = process_test_agreid(data_path, trial=trial, modal='aerial')
 
             gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
             gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
@@ -1272,8 +1275,8 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
 
             data_path=data_dir
             # AG-ReID: visible (ground/C03) -> query, thermal (aerial/C00) -> gallery
-            query_img, query_label = process_test_regdb(data_path, trial=trial, modal='visible')
-            gall_img, gall_label = process_test_regdb(data_path, trial=trial, modal='thermal')
+            query_img, query_label = process_test_agreid(data_path, trial=trial, modal='ground')
+            gall_img, gall_label = process_test_agreid(data_path, trial=trial, modal='aerial')
 
             gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
             gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)

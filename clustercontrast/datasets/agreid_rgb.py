@@ -10,17 +10,17 @@ class agreid_rgb(BaseImageDataset):
     AG-ReID ground images -> RGB modality (visible)
     
     Server structure:
-    dataset_root/ground_modify/bounding_box_train/   (training)
+    dataset_root/ground_modify/{trial}/bounding_box_train/   (training)
     dataset_root/bounding_box_test_ground/            (query)
     dataset_root/query_all_ground/                    (gallery)
     dataset_root/idx/                                 (protocol files)
     """
-    dataset_dir = 'ground_modify/'
+    dataset_dir = 'ground_modify'
 
     def __init__(self, root, trial=1, verbose=True, **kwargs):
         super(agreid_rgb, self).__init__()
         self.dataset_dir = osp.join(root, self.dataset_dir)
-        self.train_dir = osp.join(self.dataset_dir, 'bounding_box_train')
+        self.train_dir = osp.join(self.dataset_dir, str(trial), 'bounding_box_train')
 
         # Test data is at root level (not under ground_modify/)
         # In AG-ReID: ground (visible) is query, aerial (thermal) is gallery

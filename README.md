@@ -110,6 +110,11 @@ The testing script loads the trained checkpoint and computes metrics such as **R
 
 All four formal ablations use `CMhybrid` in Stage 1 and disable training-time test evaluation. Checkpoints follow a fixed final epoch policy; use the Stage 2 `model_final.pth.tar` for final evaluation. Training and testing require the same `resnet50-19c8e357.pth` through `PRETRAINED_RESNET50`, `--pretrained-resnet50`, or `PCLHD_RESNET50_PRETRAINED`.
 
+The AG-ReID `DATA_DIR` is the shared root containing
+`aerial_modify/{trial}/bounding_box_train`,
+`ground_modify/{trial}/bounding_box_train`, and `idx/test_aerial_{trial}.txt`
+plus `idx/test_ground_{trial}.txt`. Do not append `agreid_ir` or `agreid_rgb`.
+
 ```bash
 # Frozen Baseline / RAHP / CESA / Full suites
 DATA_DIR=/path/to/AG-ReID-root LOGS_DIR=logs/agreid PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_agreid_ablation.sh

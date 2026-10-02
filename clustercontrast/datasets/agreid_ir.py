@@ -10,17 +10,17 @@ class agreid_ir(BaseImageDataset):
     AG-ReID aerial images -> IR modality (thermal)
     
     Server structure:
-    dataset_root/aerial_modify/bounding_box_train/   (training)
+    dataset_root/aerial_modify/{trial}/bounding_box_train/   (training)
     dataset_root/bounding_box_test_aerial/            (gallery)
     dataset_root/query_all_aerial/                    (query)
     dataset_root/idx/                                 (protocol files)
     """
-    dataset_dir = 'aerial_modify/'
+    dataset_dir = 'aerial_modify'
 
     def __init__(self, root, trial=1, verbose=True, **kwargs):
         super(agreid_ir, self).__init__()
         self.dataset_dir = osp.join(root, self.dataset_dir)
-        self.train_dir = osp.join(self.dataset_dir, 'bounding_box_train')
+        self.train_dir = osp.join(self.dataset_dir, str(trial), 'bounding_box_train')
 
         # Test data is at root level (not under aerial_modify/)
         self.query_dir = osp.join(root, 'query_all_aerial')
