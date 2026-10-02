@@ -96,6 +96,23 @@ class CESATests(unittest.TestCase):
         self.assertEqual(state.edge_persistence, {})
         self.assertEqual(state.stage2_epoch, 0)
 
+    def test_no_matching_epoch_resets_edges_and_advances_labels(self):
+        state = CESAState()
+        state.prev_labels_aerial = np.array([9, 9, 8, 8])
+        state.prev_labels_ground = np.array([7, 7, 6, 6])
+        state.edge_persistence = {(9, 7): 0.75}
+        state.stage2_epoch = 3
+        current_aerial = [0, 0, 1, 1]
+        current_ground = [2, 2, 3, 3]
+        diagnostics = state.advance_without_matching(
+            current_aerial, current_ground)
+        self.assertFalse(diagnostics['pgm_executed'])
+        self.assertEqual(diagnostics['current_pgm_edge_count'], 0)
+        self.assertEqual(state.edge_persistence, {})
+        self.assertEqual(state.prev_labels_aerial.tolist(), current_aerial)
+        self.assertEqual(state.prev_labels_ground.tolist(), current_ground)
+        self.assertEqual(state.stage2_epoch, 4)
+
     def test_rng_checkpoint_roundtrip(self):
         random.seed(42)
         np.random.seed(42)

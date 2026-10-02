@@ -106,6 +106,32 @@ The testing script loads the trained checkpoint and computes metrics such as **R
 
 ---
 
+## AG-ReID / LAGPeR RAHP and CESA experiments
+
+All four formal ablations use `CMhybrid` in Stage 1 and disable training-time test evaluation. Checkpoints follow a fixed final epoch policy; use the Stage 2 `model_final.pth.tar` for final evaluation.
+
+```bash
+# AG-ReID: Baseline / RAHP / CESA / Full
+python train_agreid.py --data-dir /path/to/AG-ReID-root --memorybank CMhybrid --eval-during-train=False
+python train_agreid.py --data-dir /path/to/AG-ReID-root --memorybank CMhybrid --eval-during-train=False --use-rahp
+python train_agreid.py --data-dir /path/to/AG-ReID-root --memorybank CMhybrid --eval-during-train=False --use-cesa
+python train_agreid.py --data-dir /path/to/AG-ReID-root --memorybank CMhybrid --eval-during-train=False --use-rahp --use-cesa
+
+# LAGPeR: Baseline / RAHP / CESA / Full
+python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False
+python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-rahp
+python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-cesa
+python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-rahp --use-cesa
+
+# Separate final evaluation
+python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_final.pth.tar --trial 1 --batch-size 64 --workers 8
+python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --trial 1 --batch-size 64 --workers 8
+```
+
+See `docs/rahp-cesa-technical-design.md` for the frozen method definitions and protocol details.
+
+---
+
 ## 📚 Citation
 If our work is helpful for your research, please consider citing:
 

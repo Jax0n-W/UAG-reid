@@ -102,13 +102,13 @@ def extract_query_feat(model, query_loader, nquery):
 
 def process_test_regdb(img_dir, trial=1, modal='visible'):
     if modal == 'visible':
-        input_data_path = img_dir + 'idx/test_visible_{}'.format(trial) + '.txt'
+        input_data_path = osp.join(img_dir, 'idx', 'test_visible_{}.txt'.format(trial))
     elif modal == 'thermal':
-        input_data_path = img_dir + 'idx/test_thermal_{}'.format(trial) + '.txt'
+        input_data_path = osp.join(img_dir, 'idx', 'test_thermal_{}.txt'.format(trial))
     
     with open(input_data_path) as f:
         data_file_list = f.read().splitlines()
-        file_image = [img_dir + '/' + s.split(' ')[0] for s in data_file_list]
+        file_image = [osp.join(img_dir, s.split(' ')[0]) for s in data_file_list]
         file_label = [int(s.split(' ')[1]) for s in data_file_list]
         
     return file_image, np.array(file_label)
@@ -161,14 +161,13 @@ def eval_agreid(distmat, q_pids, g_pids, max_rank=20, q_camids=None, g_camids=No
     return all_cmc, mAP, mINP
 
 def main_worker(args):
-    # 专属配置路径
-    data_path = '/home/lab338/Jaxon/dataset/AG-reid/'
-    checkpoint_path = '/home/lab338/Jaxon/PCLHD-main/logs/agreid_s1/1/model_best.pth.tar'
+    data_path = args.data_dir
+    checkpoint_path = args.checkpoint
 
     model = create_model(args)
     trial = args.trial
     
-    args.test_batch = 64
+    args.test_batch = args.batch_size
     args.img_w = args.width
     args.img_h = args.height
     normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -191,7 +190,7 @@ def main_worker(args):
     gall_img, gall_label = process_test_regdb(data_path, trial=trial, modal='visible')
 
     queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-    query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=4)
+    query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
     gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
     gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
     
@@ -215,7 +214,7 @@ def main_worker(args):
     gall_img, gall_label = process_test_regdb(data_path, trial=trial, modal='thermal')
 
     queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-    query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=4)
+    query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
     gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
     gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
     
@@ -238,6 +237,9 @@ def main():
     parser.add_argument('--dropout', type=float, default=0)
     parser.add_argument('--pooling-type', type=str, default='gem')
     parser.add_argument('-j', '--workers', type=int, default=8)
+    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--data-dir', type=str, required=True)
+    parser.add_argument('--checkpoint', type=str, required=True)
     parser.add_argument('--height', type=int, default=288)
     parser.add_argument('--width', type=int, default=144)
     parser.add_argument('--trial', type=int, default=1)

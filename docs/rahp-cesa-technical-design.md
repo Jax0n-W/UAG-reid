@@ -15,7 +15,7 @@ The starting tree contained only SYSU/RegDB. The user supplied `C:/Users/Jaxon/D
 | Stage 2 memory calls | `clustercontrast/trainers.py:124-204` | Encoder domain memories call `cm_hybrid`, including the encoder path of `CMhard`; ALL memory uses `CMhybrid`. `encoder_ema` calls `cm_hard` on `features_ema`, which stays unchanged. Cross loss remains at coefficient `0.25`. |
 | Dynamic hard proxy | `clustercontrast/models/cm.py:41-83` | Group by pseudo-ID, measure each instance against the old mean slot, update mean slot, select hard index, update hard slot. The disabled path keeps the original `np.argmin(np.array(distances))` and momentum formulas. |
 | PGM | `train_agreid.py` and `train_lag.py`, Stage 2; original analogues `train_sysu.py:985-1041` and `train_regdb.py:818-861` | Normalize prototypes, compute raw cosine, exponentiate, reciprocal cost, Hungarian plus original unmatched completion, then `r2i/i2r` label translation. `R` is the final edge set. CESA score calibration belongs strictly between raw cosine and `exp()`. Each entrypoint retains its original unmatched handling. |
-| Checkpoints | `train_agreid.py` and `train_lag.py`, Stage 2 save sites | Stage 2 checkpoint includes `cesa_state` when CESA is on; resume missing state as empty history with a warning. |
+| Checkpoints | `train_agreid.py` and `train_lag.py`, both stages | Every epoch writes `checkpoint.pth.tar` for latest/resume. The predetermined last epoch also writes `model_final.pth.tar`. Test metrics never select a checkpoint. Stage 2 always stores model, EMA, optimizer, scheduler, RNG, DBSCAN eps, epoch and optional CESA state. |
 
 ## RAHP shared API and algorithm
 
@@ -31,6 +31,14 @@ Each AG/LAG trainer builds `q_filtered` in the same loop as each filtered pseudo
 
 At PGM's raw-cosine point, surviving previous edge keys are mapped through the two lineage maps into a sparse history boost. `calibrated_score = raw_cosine + min(stage2_epoch / warmup, 1) * eta * H_minus`. The caller then executes its existing `exp()`, reciprocal cost, Hungarian and unmatched logic unchanged. In these two entrypoints PGM is inline and `R` already remains in caller scope, so there is no return API to change. Source PGM rows are ground and columns are aerial; the integration transposes the score for CESA's aerial/ground state and converts each final `R` pair from `(ground, aerial)` to `(aerial, ground)`. `r2i/i2r` and the trainer's cross loss do not change. The first Stage 2 epoch has zero boost. After matching, each edge in final `R` receives `rho * H_prev + (1-rho)` only when its pair of lineage predecessors was a previous matched edge; otherwise it receives `1-rho`. Switching partner therefore restarts persistence. Checkpoint `cesa_state` contains `prev_labels_aerial`, `prev_labels_ground`, `edge_persistence`, and `stage2_epoch`; CESA checkpoints also store model, optimizer, scheduler, RNG and clustering eps for resume.
 
+When `num_cluster_rgb < num_cluster_ir`, the frozen baseline does not execute PGM and retains `R=[]`, `r2i={}`, and `i2r={}`. CESA calls `advance_without_matching`: it records the current aligned aerial and ground pseudo labels, clears sparse edge persistence, and increments `stage2_epoch`. Its diagnostic reports `pgm_executed=False` and zero edges. This makes the next lineage transition compare adjacent epochs and prevents stale edges from crossing a no-match epoch.
+
+## Checkpoint and evaluation protocol
+
+Formal experiment checkpoint: **fixed final epoch**. Stage 1 and Stage 2 write `checkpoint.pth.tar` after every epoch and `model_final.pth.tar` only after the configured final epoch. Stage 2 initializes from the Stage 1 `model_final.pth.tar`. `--eval-during-train=False` is the default, so formal training does not read the test split each epoch. Enabling it is a debug-only logging option; Rank-1, mAP and mINP do not affect saving, resume, initialization, early stopping, or any training branch. Final evaluation is a separate command and loads the Stage 2 `model_final.pth.tar`.
+
+RAHP Stage 1 requires `--memorybank CMhybrid`. An explicit `--use-rahp` with Stage 1 and any other memory bank raises `ValueError`. `--stage2-only --use-rahp` remains valid because it skips Stage 1.
+
 ## CLI, ablations, and boundaries
 
 The shared CLI helper defines `--use-rahp`, `--rahp-beta` (0.25), `--rahp-knn` (20), `--rahp-alpha` (0.5), `--use-cesa`, `--cesa-rho` (0.8), `--cesa-eta` (0.1), `--cesa-lineage-thr` (0.5), and `--cesa-warmup` (5). It derives `baseline`, `rahp`, `cesa`, or `rahp_cesa` from the two flags. Both AG-ReID and LAGPeR RGB/RGB entrypoints omit `ChannelExchange`, `ChannelAdapGray`, and related VI channel simulation by default while retaining the established ordinary transforms. `agw` remains the only accepted architecture in these entrypoints and uses ResNet-50. DBSCAN, PGM unmatched completion, and evaluation protocols remain outside this method change.
@@ -38,15 +46,22 @@ The shared CLI helper defines `--use-rahp`, `--rahp-beta` (0.25), `--rahp-knn` (
 The AG-ReID data root follows the supplied adapter's `agreid_ir/aerial_modify/bounding_box_train` and `agreid_rgb/ground_modify/bounding_box_train` layout plus its existing test/index paths. LAGPeR uses `aerial_modify/<trial>/bounding_box_train` and `ground_modify/<trial>/bounding_box_train` beneath one dataset root plus its existing test/index paths. For comparable Stage 1 hard-proxy ablations, use `--memorybank CMhybrid` in every group:
 
 ```bash
-python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid
-python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --use-rahp
-python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --use-cesa
-python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --use-rahp --use-cesa
+python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --eval-during-train=False
+python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --eval-during-train=False --use-rahp
+python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --eval-during-train=False --use-cesa
+python train_agreid.py --data-dir /path/to/AG-ReID-adapter-root --memorybank CMhybrid --eval-during-train=False --use-rahp --use-cesa
 
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --use-rahp
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --use-cesa
-python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --use-rahp --use-cesa
+python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False
+python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-rahp
+python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-cesa
+python train_lag.py --data-dir /path/to/LAGPeR-root --memorybank CMhybrid --eval-during-train=False --use-rahp --use-cesa
+```
+
+The standalone test scripts parameterize all paths and runtime loader settings. AG-ReID reports A to G and G to A. LAGPeR reports A to G, G to A, and G to A+G:
+
+```bash
+python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_final.pth.tar --trial 1 --batch-size 64 --workers 8
+python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --trial 1 --batch-size 64 --workers 8
 ```
 
 ## Verification gates

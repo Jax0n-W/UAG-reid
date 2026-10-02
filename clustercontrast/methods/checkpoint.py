@@ -1,9 +1,35 @@
-"""Training RNG state used when resuming CESA Stage 2 checkpoints."""
+"""Fixed-final checkpoint policy and resumable training state helpers."""
 
+import os
 import random
 
 import numpy as np
 import torch
+
+
+LATEST_CHECKPOINT = 'checkpoint.pth.tar'
+FINAL_CHECKPOINT = 'model_final.pth.tar'
+
+
+def final_checkpoint_path(directory):
+    return os.path.join(directory, FINAL_CHECKPOINT)
+
+
+def save_fixed_epoch_checkpoint(state, directory, is_final_epoch):
+    """Always save latest state and also save the predetermined final epoch."""
+    os.makedirs(directory, exist_ok=True)
+    latest_path = os.path.join(directory, LATEST_CHECKPOINT)
+    torch.save(state, latest_path)
+    final_path = None
+    if is_final_epoch:
+        final_path = final_checkpoint_path(directory)
+        torch.save(state, final_path)
+    return latest_path, final_path
+
+
+def should_evaluate_during_train(args, epoch):
+    return (bool(args.eval_during_train)
+            and (epoch + 1) % max(1, int(args.eval_step)) == 0)
 
 
 def capture_rng_state():

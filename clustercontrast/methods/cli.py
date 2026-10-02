@@ -1,6 +1,17 @@
 """Shared frozen method flags and experiment naming."""
 
 
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized in ('1', 'true', 'yes', 'on'):
+        return True
+    if normalized in ('0', 'false', 'no', 'off'):
+        return False
+    raise ValueError("expected a boolean value")
+
+
 def add_method_arguments(parser):
     parser.add_argument('--use-rahp', action='store_true')
     parser.add_argument('--rahp-beta', type=float, default=0.25)
@@ -33,3 +44,6 @@ def validate_method_args(args):
         raise ValueError('--cesa-rho must be in [0, 1) and --cesa-eta nonnegative')
     if not 0.0 <= args.cesa_lineage_thr <= 1.0 or args.cesa_warmup < 1:
         raise ValueError('--cesa-lineage-thr must be in [0, 1] and --cesa-warmup positive')
+    if (args.use_rahp and not getattr(args, 'stage2_only', False)
+            and getattr(args, 'memorybank', None) != 'CMhybrid'):
+        raise ValueError('RAHP Stage1 requires --memorybank CMhybrid.')

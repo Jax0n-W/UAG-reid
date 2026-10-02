@@ -28,16 +28,19 @@ from clustercontrast.methods.cesa import (
     CESAState, disabled_cesa_diagnostics, format_cesa_epoch,
 )
 from clustercontrast.methods.cli import (
-    add_method_arguments, experiment_tag, validate_method_args,
+    add_method_arguments, experiment_tag, parse_bool, validate_method_args,
 )
-from clustercontrast.methods.checkpoint import capture_rng_state, restore_rng_state
+from clustercontrast.methods.checkpoint import (
+    capture_rng_state, final_checkpoint_path, restore_rng_state,
+    save_fixed_epoch_checkpoint, should_evaluate_during_train,
+)
 from clustercontrast.trainers import ClusterContrastTrainer_DCL, ClusterContrastTrainer_PCLMP
 from clustercontrast.evaluators import Evaluator, extract_features
 from clustercontrast.utils.data import IterLoader
 from clustercontrast.utils.data import transforms as T
 from clustercontrast.utils.data.preprocessor import Preprocessor, Preprocessor_color
 from clustercontrast.utils.logging import Logger
-from clustercontrast.utils.serialization import load_checkpoint, save_checkpoint
+from clustercontrast.utils.serialization import load_checkpoint
 from clustercontrast.utils.faiss_rerank import compute_jaccard_distance, compute_modal_invariant_jaccard_distance
 from clustercontrast.utils.data.sampler import RandomMultipleGallerySampler, RandomMultipleGallerySamplerNoCam
 import os
@@ -47,9 +50,6 @@ import math
 from ChannelAug import ChannelAdap, ChannelAdapGray, ChannelRandomErasing, ChannelExchange, Gray
 from collections import Counter
 from scipy.optimize import linear_sum_assignment
-start_epoch = best_mAP = 0
-
-
 def get_data(name, data_dir, trial=0):
     root = data_dir
     dataset = datasets.create(name, root, trial=trial)
@@ -314,14 +314,14 @@ def associated_analysis_for_all(all_origin, all_pred, image_paths_for_all, log_d
 
 def main():
     args = parser.parse_args()
+    if args.resume:
+        args.stage2_only = True
     validate_method_args(args)
     args.experiment_tag = experiment_tag(args)
     if args.dry_run:
         print('[SMOKE] LAGPeR experiment={} rahp={} cesa={}'.format(
             args.experiment_tag, args.use_rahp, args.use_cesa))
         return
-    if args.resume:
-        args.stage2_only = True
     if args.seed is not None:
         random.seed(args.seed)
         np.random.seed(args.seed)
@@ -342,8 +342,6 @@ def main_worker_stage1(args, log_s1_name):
     data_dir = args.data_dir
     trial = args.trial
     start_epoch = 0
-    best_mAP = 0
-    best_R1 = 0
     args.logs_dir = osp.join(logs_dir_root, str(trial))
     start_time = time.monotonic()
 
@@ -523,7 +521,7 @@ def main_worker_stage1(args, log_s1_name):
                       rahp_beta=args.rahp_beta, rahp_stats=rahp_stats)
         print(format_rahp_epoch(rahp_diags, rahp_stats, args.use_rahp))
 
-        if epoch >= 0:
+        if should_evaluate_during_train(args, epoch):
             args.test_batch = 64
             args.img_w = args.width
             args.img_h = args.height
@@ -554,20 +552,16 @@ def main_worker_stage1(args, log_s1_name):
             print('FC:   Rank-1: {:.2%} | Rank-5: {:.2%} | Rank-10: {:.2%}| Rank-20: {:.2%}| mAP: {:.2%}| mINP: {:.2%}'.format(
                 cmc[0], cmc[4], cmc[9], cmc[19], mAP, mINP))
 
-            is_best = (cmc[0] > best_R1)
-            if is_best:
-                best_R1 = max(cmc[0], best_R1)
-                best_mAP = mAP
-                best_epoch = epoch
-            best_mAP = max(mAP, best_mAP)
-            save_checkpoint({
-                'state_dict': model.state_dict(),
-                'epoch': epoch + 1,
-                'best_mAP': best_mAP,
-            }, is_best, fpath=osp.join(args.logs_dir, 'checkpoint.pth.tar'))
-
-            print('\n * Finished epoch {:3d}   model R1: {:5.1%}  model mAP: {:5.1%}   best R1: {:5.1%}   best mAP: {:5.1%}(best_epoch:{})\n'.format(
-                epoch, cmc[0], mAP, best_R1, best_mAP, best_epoch))
+            print('\n * Debug evaluation epoch {:3d}   model R1: {:5.1%}  model mAP: {:5.1%}\n'.format(
+                epoch, cmc[0], mAP))
+        checkpoint_state = {
+            'state_dict': model.state_dict(),
+            'epoch': epoch + 1,
+        }
+        _, final_path = save_fixed_epoch_checkpoint(
+            checkpoint_state, args.logs_dir, epoch + 1 == args.epochs)
+        print('[CHECKPOINT] latest epoch={} policy=fixed-final{}'.format(
+            epoch + 1, ' final={}'.format(final_path) if final_path else ''))
         lr_scheduler.step()
     end_time = time.monotonic()
     print('Total running time: ', timedelta(seconds=end_time - start_time))
@@ -578,9 +572,6 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
     logs_dir_root = osp.join(logs_root, log_s2_name)
     trial = args.trial
     start_epoch = 0
-    best_mAP = 0
-    best_R1 = 0
-    best_epoch = -1
     args.memorybank = 'CMhard'
     data_dir = args.data_dir
     args.logs_dir = osp.join(logs_dir_root, str(trial))
@@ -599,8 +590,8 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
     test_loader_rgb = get_test_loader(dataset_rgb, args.height, args.width, args.batch_size, args.workers)
     model, model_ema = create_model(args)
     if not args.resume:
-        checkpoint = load_checkpoint(osp.join(logs_root, log_s1_name,
-                                              str(trial), 'model_best.pth.tar'))
+        checkpoint = load_checkpoint(final_checkpoint_path(
+            osp.join(logs_root, log_s1_name, str(trial))))
         model.load_state_dict(checkpoint['state_dict'])
         model_ema.load_state_dict(checkpoint['state_dict'])
 
@@ -623,9 +614,6 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             lr_scheduler.load_state_dict(resumed['scheduler_state_dict'])
             lr_scheduler.step()  # checkpoint is saved before the end-of-epoch step
         start_epoch = int(resumed['epoch'])
-        best_mAP = resumed.get('best_mAP', best_mAP)
-        best_R1 = resumed.get('best_R1', best_R1)
-        best_epoch = resumed.get('best_epoch', start_epoch - 1)
         resume_cluster_eps = resumed.get('dbscan_eps')
         restore_rng_state(resumed.get('rng_state'))
         if cesa_state is not None:
@@ -853,7 +841,8 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
         r2i = {}
         R = []
         bgm = False
-        if num_cluster_rgb >= num_cluster_ir:
+        pgm_executed = num_cluster_rgb >= num_cluster_ir
+        if pgm_executed:
             cluster_features_rgb = F.normalize(cluster_features_rgb, dim=1)
             cluster_features_ir = F.normalize(cluster_features_ir, dim=1)
             raw_cosine = (torch.mm(cluster_features_rgb, cluster_features_ir.T)) / 1
@@ -886,14 +875,19 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             del cluster_features_ir, cluster_features_rgb
 
         print("Finish Bipartite Graph Matching")
-        if cesa_state is not None:
+        if cesa_state is not None and pgm_executed:
             # PGM R is (ground, aerial); CESA stores (aerial, ground).
             matched_edges = [(int(a), int(g)) for g, a in R]
             cesa_diag = cesa_state.complete(
                 cesa_prepared, matched_edges, pseudo_labels_ir, pseudo_labels_rgb)
             print(format_cesa_epoch(cesa_diag))
+        elif cesa_state is not None:
+            cesa_diag = cesa_state.advance_without_matching(
+                pseudo_labels_ir, pseudo_labels_rgb)
+            print(format_cesa_epoch(cesa_diag))
         else:
-            print(format_cesa_epoch(disabled_cesa_diagnostics(len(R))))
+            print(format_cesa_epoch(disabled_cesa_diagnostics(
+                len(R), pgm_executed=pgm_executed)))
         ####################################
         normalizer = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         height = args.height
@@ -963,7 +957,7 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
                       rahp_beta=args.rahp_beta, rahp_stats=rahp_stats)
         print(format_rahp_epoch(rahp_diags, rahp_stats, args.use_rahp))
 
-        if epoch >= 0:
+        if should_evaluate_during_train(args, epoch):
             args.test_batch = 64
             args.img_w = args.width
             args.img_h = args.height
@@ -994,29 +988,22 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             print('FC:   Rank-1: {:.2%} | Rank-5: {:.2%} | Rank-10: {:.2%}| Rank-20: {:.2%}| mAP: {:.2%}| mINP: {:.2%}'.format(
                 cmc[0], cmc[4], cmc[9], cmc[19], mAP, mINP))
 
-            is_best = (cmc[0] > best_R1)
-            if is_best:
-                best_R1 = max(cmc[0], best_R1)
-                best_mAP = mAP
-                best_epoch = epoch
-
-            save_checkpoint({
-                'state_dict': model_ema.state_dict(),
-                'epoch': epoch + 1,
-                'best_mAP': best_mAP,
-                **({'cesa_state': cesa_state.state_dict(),
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': lr_scheduler.state_dict(),
-                    'best_R1': best_R1,
-                    'best_epoch': best_epoch,
-                    'dbscan_eps': (cluster_ir.eps, cluster_rgb.eps, cluster_all.eps),
-                    'rng_state': capture_rng_state()}
-                   if cesa_state is not None else {}),
-            }, is_best, fpath=osp.join(args.logs_dir, 'checkpoint.pth.tar'))
-
-            print('\n * Finished epoch {:3d}   model R1: {:5.1%}  model mAP: {:5.1%}   best R1: {:5.1%}   best mAP: {:5.1%}(best_epoch:{})\n'.format(
-                epoch, cmc[0], mAP, best_R1, best_mAP, best_epoch))
+            print('\n * Debug evaluation epoch {:3d}   model R1: {:5.1%}  model mAP: {:5.1%}\n'.format(
+                epoch, cmc[0], mAP))
+        checkpoint_state = {
+            'state_dict': model_ema.state_dict(),
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': lr_scheduler.state_dict(),
+            'rng_state': capture_rng_state(),
+            'dbscan_eps': (cluster_ir.eps, cluster_rgb.eps, cluster_all.eps),
+            'cesa_state': None if cesa_state is None else cesa_state.state_dict(),
+            'epoch': epoch + 1,
+        }
+        _, final_path = save_fixed_epoch_checkpoint(
+            checkpoint_state, args.logs_dir, epoch + 1 == args.epochs)
+        print('[CHECKPOINT] latest epoch={} policy=fixed-final{}'.format(
+            epoch + 1, ' final={}'.format(final_path) if final_path else ''))
         lr_scheduler.step()
     end_time = time.monotonic()
     print('Total running time: ', timedelta(seconds=end_time - start_time))
@@ -1068,6 +1055,9 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--print-freq', type=int, default=10)
     parser.add_argument('--eval-step', type=int, default=1)
+    parser.add_argument('--eval-during-train', type=parse_bool, nargs='?',
+                        const=True, default=False,
+                        help='debug-only test evaluation; never selects checkpoints')
     parser.add_argument('--trial', type=int, default=1)
     parser.add_argument('--temp', type=float, default=0.05,
                         help="temperature for scaling contrastive loss")

@@ -8,7 +8,9 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
-from clustercontrast.methods.cesa import CESAState
+from clustercontrast.methods.cesa import (
+    CESAState, disabled_cesa_diagnostics, format_cesa_epoch,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,22 +42,38 @@ def original_pgm_oracle(rgb, ir):
     return edges, r2i, i2r
 
 
-def run_actual_stage2_pgm(script, cesa_state=None):
+def run_actual_stage2_pgm(script, cesa_state=None, num_cluster_rgb=3,
+                          num_cluster_ir=2, pseudo_labels_rgb=None,
+                          pseudo_labels_ir=None, include_diagnostics=False):
     source = (ROOT / script).read_text(encoding='utf-8')
     start = source.index('        ######################## PGM')
-    end = source.index('        print("Finish Bipartite Graph Matching")', start)
+    end = source.index('        ####################################', start)
     code = textwrap.dedent(source[start:end])
-    rgb = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
-    ir = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    basis = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0],
+                          [0.0, -1.0]])
+    rgb = basis[:num_cluster_rgb].clone()
+    ir = basis[:num_cluster_ir].clone()
+    if pseudo_labels_rgb is None:
+        pseudo_labels_rgb = [label for label in range(num_cluster_rgb)
+                             for _ in range(2)]
+    if pseudo_labels_ir is None:
+        pseudo_labels_ir = [label for label in range(num_cluster_ir)
+                            for _ in range(2)]
     namespace = {'torch': torch, 'F': F,
                  'linear_sum_assignment': linear_sum_assignment,
-                 'num_cluster_rgb': 3, 'num_cluster_ir': 2,
+                 'format_cesa_epoch': format_cesa_epoch,
+                 'disabled_cesa_diagnostics': disabled_cesa_diagnostics,
+                 'num_cluster_rgb': num_cluster_rgb,
+                 'num_cluster_ir': num_cluster_ir,
                  'cluster_features_rgb': rgb, 'cluster_features_ir': ir,
-                 'pseudo_labels_rgb': [0, 0, 1, 1, 2, 2],
-                 'pseudo_labels_ir': [0, 0, 1, 1],
+                 'pseudo_labels_rgb': pseudo_labels_rgb,
+                 'pseudo_labels_ir': pseudo_labels_ir,
                  'cesa_state': cesa_state}
     exec(code, namespace)
-    return namespace['R'], namespace['r2i'], namespace['i2r']
+    result = (namespace['R'], namespace['r2i'], namespace['i2r'])
+    if include_diagnostics:
+        return result + (namespace.get('cesa_diag'),)
+    return result
 
 
 class PGMIntegrationTests(unittest.TestCase):
@@ -76,6 +94,41 @@ class PGMIntegrationTests(unittest.TestCase):
                 baseline = run_actual_stage2_pgm(script)
                 with_cesa = run_actual_stage2_pgm(script, CESAState())
                 self.assertEqual(with_cesa, baseline)
+
+    def test_cluster_count_inversion_preserves_baseline_and_advances_cesa(self):
+        aerial = [0, 0, 1, 1, 2, 2]
+        ground = [0, 0, 1, 1]
+        for script in ('train_agreid.py', 'train_lag.py'):
+            with self.subTest(script=script):
+                baseline = run_actual_stage2_pgm(
+                    script, num_cluster_rgb=2, num_cluster_ir=3,
+                    pseudo_labels_rgb=ground, pseudo_labels_ir=aerial)
+                self.assertEqual(baseline, ([], {}, {}))
+
+                state = CESAState()
+                state.edge_persistence = {(0, 0): 0.7}
+                result = run_actual_stage2_pgm(
+                    script, state, num_cluster_rgb=2, num_cluster_ir=3,
+                    pseudo_labels_rgb=ground, pseudo_labels_ir=aerial,
+                    include_diagnostics=True)
+                self.assertEqual(result[:3], ([], {}, {}))
+                self.assertFalse(result[3]['pgm_executed'])
+                self.assertEqual(state.edge_persistence, {})
+                self.assertEqual(state.prev_labels_aerial.tolist(), aerial)
+                self.assertEqual(state.prev_labels_ground.tolist(), ground)
+                self.assertEqual(state.stage2_epoch, 1)
+
+                next_aerial = [0, 0, 1, 1, -1, -1]
+                next_ground = [0, 0, 1, 2]
+                edges, _, _, diagnostics = run_actual_stage2_pgm(
+                    script, state, num_cluster_rgb=3, num_cluster_ir=2,
+                    pseudo_labels_rgb=next_ground,
+                    pseudo_labels_ir=next_aerial, include_diagnostics=True)
+                self.assertTrue(edges)
+                self.assertGreater(diagnostics['valid_aerial_lineages'], 0)
+                self.assertGreater(diagnostics['valid_ground_lineages'], 0)
+                self.assertTrue(state.edge_persistence)
+                self.assertEqual(state.stage2_epoch, 2)
 
 
 if __name__ == '__main__':

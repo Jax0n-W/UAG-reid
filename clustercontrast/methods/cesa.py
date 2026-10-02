@@ -176,6 +176,7 @@ class CESAState:
         count = len(edges)
         return {
             'enabled': True,
+            'pgm_executed': True,
             'valid_aerial_lineages': len(prepared.lineage_aerial),
             'valid_ground_lineages': len(prepared.lineage_ground),
             'aerial_lineage_survival_rate': len(prepared.lineage_aerial) / max(1, prepared.num_aerial_clusters),
@@ -189,6 +190,30 @@ class CESAState:
             'max_persistence': max(values) if values else 0.0,
             'mean_applied_history_boost': float(np.mean(applied)) if applied else 0.0,
             'number_of_boosted_pgm_cells': len(applied),
+        }
+
+    def advance_without_matching(self, current_aerial, current_ground):
+        """Advance one epoch when baseline PGM produced no matching attempt."""
+        self.prev_labels_aerial = _labels(current_aerial).copy()
+        self.prev_labels_ground = _labels(current_ground).copy()
+        self.edge_persistence = {}
+        self.stage2_epoch += 1
+        return {
+            'enabled': True,
+            'pgm_executed': False,
+            'valid_aerial_lineages': 0,
+            'valid_ground_lineages': 0,
+            'aerial_lineage_survival_rate': 0.0,
+            'ground_lineage_survival_rate': 0.0,
+            'current_pgm_edge_count': 0,
+            'continued_edge_count': 0,
+            'new_edge_count': 0,
+            'partner_switch_count': 0,
+            'partner_switch_rate': 0.0,
+            'mean_historical_persistence': 0.0,
+            'max_persistence': 0.0,
+            'mean_applied_history_boost': 0.0,
+            'number_of_boosted_pgm_cells': 0,
         }
 
     def state_dict(self):
@@ -217,11 +242,11 @@ class CESAState:
 
 def format_cesa_epoch(diagnostics):
     d = diagnostics
-    return ('[CESA] enabled={} lineages_a={} lineages_g={} survival_a={:.4f} '
+    return ('[CESA] enabled={} pgm_executed={} lineages_a={} lineages_g={} survival_a={:.4f} '
             'survival_g={:.4f} edges={} continued={} new={} switches={} '
             'switch_rate={:.4f} mean_h={:.4f} max_h={:.4f} mean_boost={:.6f} '
             'boosted_cells={}').format(
-                d['enabled'], d['valid_aerial_lineages'], d['valid_ground_lineages'],
+                d['enabled'], d['pgm_executed'], d['valid_aerial_lineages'], d['valid_ground_lineages'],
                 d['aerial_lineage_survival_rate'], d['ground_lineage_survival_rate'],
                 d['current_pgm_edge_count'], d['continued_edge_count'],
                 d['new_edge_count'], d['partner_switch_count'],
@@ -230,8 +255,9 @@ def format_cesa_epoch(diagnostics):
                 d['number_of_boosted_pgm_cells'])
 
 
-def disabled_cesa_diagnostics(edge_count):
-    return {'enabled': False, 'valid_aerial_lineages': 0,
+def disabled_cesa_diagnostics(edge_count, pgm_executed=True):
+    return {'enabled': False, 'pgm_executed': bool(pgm_executed),
+            'valid_aerial_lineages': 0,
             'valid_ground_lineages': 0,
             'aerial_lineage_survival_rate': 0.0,
             'ground_lineage_survival_rate': 0.0,
