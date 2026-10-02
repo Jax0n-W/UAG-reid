@@ -11,6 +11,10 @@ from .sysu_ir import sysu_ir
 from .sysu_rgb import sysu_rgb
 from .regdb_ir import regdb_ir
 from .regdb_rgb import regdb_rgb
+from .agreid_ir import agreid_ir
+from .agreid_rgb import agreid_rgb
+from .lag_ir import lag_ir
+from .lag_rgb import lag_rgb
 __factory = {
     'market1501': Market1501,
     'msmt17': MSMT17,
@@ -21,7 +25,11 @@ __factory = {
     'sysu_ir':sysu_ir,
     'sysu_rgb':sysu_rgb,
     'regdb_ir':regdb_ir,
-    'regdb_rgb':regdb_rgb
+    'regdb_rgb':regdb_rgb,
+    'agreid_ir': agreid_ir,
+    'agreid_rgb': agreid_rgb,
+    'lag_ir': lag_ir,
+    'lag_rgb': lag_rgb
 }
 
 

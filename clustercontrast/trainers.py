@@ -4,6 +4,7 @@ from .utils.meters import AverageMeter
 import torch.nn as nn
 import torch
 from torch.nn import functional as F
+from .methods.rahp import gather_batch_reliability
 
 
 def pdist_torch(emb1, emb2):
@@ -49,7 +50,8 @@ class ClusterContrastTrainer_DCL(object):
         # self.tri = TripletLoss_ADP(alpha = 1, gamma = 1, square = 1)
 
     def train(self, epoch, data_loader_ir, data_loader_rgb,
-              optimizer, print_freq=10, train_iters=400):
+              optimizer, print_freq=10, train_iters=400,
+              rahp_ir=None, rahp_rgb=None, rahp_beta=0.25, rahp_stats=None):
         self.encoder.train()
 
         batch_time = AverageMeter()
@@ -67,6 +69,11 @@ class ClusterContrastTrainer_DCL(object):
             # process inputs
             inputs_ir, labels_ir, indexes_ir = self._parse_data_ir(inputs_ir)
             inputs_rgb, inputs_rgb1, labels_rgb, indexes_rgb = self._parse_data_rgb(inputs_rgb)
+            q_ir = (gather_batch_reliability(rahp_ir, indexes_ir, device=labels_ir.device)
+                    if rahp_ir is not None else None)
+            q_rgb = (gather_batch_reliability(rahp_rgb, indexes_rgb,
+                                              duplicate_views=True, device=labels_rgb.device)
+                     if rahp_rgb is not None else None)
             # forward
             inputs_rgb = torch.cat((inputs_rgb, inputs_rgb1), 0)
             labels_rgb = torch.cat((labels_rgb, labels_rgb), -1)
@@ -74,8 +81,10 @@ class ClusterContrastTrainer_DCL(object):
                                                                                              label_1=labels_rgb,
                                                                                              label_2=labels_ir, modal=0)
 
-            loss_ir = self.memory_ir(f_out_ir, labels_ir)
-            loss_rgb = self.memory_rgb(f_out_rgb, labels_rgb)
+            loss_ir = self.memory_ir(f_out_ir, labels_ir, reliability=q_ir,
+                                     rahp_beta=rahp_beta, rahp_stats=rahp_stats)
+            loss_rgb = self.memory_rgb(f_out_rgb, labels_rgb, reliability=q_rgb,
+                                       rahp_beta=rahp_beta, rahp_stats=rahp_stats)
             loss = loss_ir + loss_rgb
             optimizer.zero_grad()
             loss.backward()
@@ -121,7 +130,9 @@ class ClusterContrastTrainer_PCLMP(object):
         self.memory_all = memory
 
     def train(self, epoch, data_loader_ir, data_loader_rgb, data_loader_all_ir, data_loader_all_rgb,
-              optimizer, print_freq=10, train_iters=400, i2r=None, r2i=None):
+              optimizer, print_freq=10, train_iters=400, i2r=None, r2i=None,
+              rahp_ir=None, rahp_rgb=None, rahp_all_ir=None, rahp_all_rgb=None,
+              rahp_beta=0.25, rahp_stats=None):
         self.encoder.train()
         self.encoder_ema.train()
 
@@ -140,6 +151,11 @@ class ClusterContrastTrainer_PCLMP(object):
             # process inputs
             inputs_ir, labels_ir, indexes_ir = self._parse_data_ir(inputs_ir)
             inputs_rgb, inputs_rgb1, labels_rgb, indexes_rgb = self._parse_data_rgb(inputs_rgb)
+            q_ir = (gather_batch_reliability(rahp_ir, indexes_ir, device=labels_ir.device)
+                    if rahp_ir is not None else None)
+            q_rgb = (gather_batch_reliability(rahp_rgb, indexes_rgb,
+                                              duplicate_views=True, device=labels_rgb.device)
+                     if rahp_rgb is not None else None)
             # forward
             inputs_rgb = torch.cat((inputs_rgb, inputs_rgb1), 0)
             labels_rgb = torch.cat((labels_rgb, labels_rgb), -1)
@@ -147,8 +163,10 @@ class ClusterContrastTrainer_PCLMP(object):
                                                                                              label_1=labels_rgb,
                                                                                              label_2=labels_ir,
                                                                                              modal=0)
-            loss_ir = self.memory_ir(f_out_ir, labels_ir)
-            loss_rgb = self.memory_rgb(f_out_rgb, labels_rgb)
+            loss_ir = self.memory_ir(f_out_ir, labels_ir, reliability=q_ir,
+                                     rahp_beta=rahp_beta, rahp_stats=rahp_stats)
+            loss_rgb = self.memory_rgb(f_out_rgb, labels_rgb, reliability=q_rgb,
+                                       rahp_beta=rahp_beta, rahp_stats=rahp_stats)
 
             # cross contrastive learning
             if r2i:
@@ -158,11 +176,20 @@ class ClusterContrastTrainer_PCLMP(object):
                 if alternate:
                     # accl
                     if epoch % 2 == 1:
-                        cross_loss = 1 * self.memory_rgb(f_out_ir, ir2rgb_labels.long())
+                        cross_loss = 1 * self.memory_rgb(f_out_ir, ir2rgb_labels.long(),
+                                                         reliability=q_ir, rahp_beta=rahp_beta,
+                                                         rahp_stats=rahp_stats)
                     else:
-                        cross_loss = 1 * self.memory_ir(f_out_rgb, rgb2ir_labels.long())
+                        cross_loss = 1 * self.memory_ir(f_out_rgb, rgb2ir_labels.long(),
+                                                        reliability=q_rgb, rahp_beta=rahp_beta,
+                                                        rahp_stats=rahp_stats)
                 else:
-                    cross_loss = self.memory_rgb(f_out_ir, ir2rgb_labels.long()) + self.memory_ir(f_out_rgb, rgb2ir_labels.long())
+                    cross_loss = (self.memory_rgb(f_out_ir, ir2rgb_labels.long(),
+                                                  reliability=q_ir, rahp_beta=rahp_beta,
+                                                  rahp_stats=rahp_stats)
+                                  + self.memory_ir(f_out_rgb, rgb2ir_labels.long(),
+                                                   reliability=q_rgb, rahp_beta=rahp_beta,
+                                                   rahp_stats=rahp_stats))
             else:
                 cross_loss = torch.tensor(0.0)
 
@@ -190,6 +217,13 @@ class ClusterContrastTrainer_PCLMP(object):
             # process inputs
             inputs_all_ir, labels_all_ir, indexes_all_ir = self._parse_data_ir(inputs_all_ir)
             inputs_all_rgb, inputs_all_rgb1, labels_all_rgb, indexes_all_rgb = self._parse_data_rgb(inputs_all_rgb)
+            q_all_ir = (gather_batch_reliability(rahp_all_ir, indexes_all_ir,
+                                                 device=labels_all_ir.device)
+                        if rahp_all_ir is not None else None)
+            q_all_rgb = (gather_batch_reliability(rahp_all_rgb, indexes_all_rgb,
+                                                  duplicate_views=True,
+                                                  device=labels_all_rgb.device)
+                         if rahp_all_rgb is not None else None)
             # forward
             inputs_all_rgb = torch.cat((inputs_all_rgb, inputs_all_rgb1), 0)
             labels_all_rgb = torch.cat((labels_all_rgb, labels_all_rgb), -1)
@@ -199,8 +233,12 @@ class ClusterContrastTrainer_PCLMP(object):
                                                                                         label_1=labels_all_rgb,
                                                                                         label_2=labels_all_ir, modal=0)
 
-            loss_all_ir = self.memory_all(f_out_all_ir, labels_all_ir)
-            loss_all_rgb = self.memory_all(f_out_all_rgb, labels_all_rgb)
+            loss_all_ir = self.memory_all(f_out_all_ir, labels_all_ir,
+                                          reliability=q_all_ir, rahp_beta=rahp_beta,
+                                          rahp_stats=rahp_stats)
+            loss_all_rgb = self.memory_all(f_out_all_rgb, labels_all_rgb,
+                                           reliability=q_all_rgb, rahp_beta=rahp_beta,
+                                           rahp_stats=rahp_stats)
 
             loss2 = loss_all_ir + loss_all_rgb
 

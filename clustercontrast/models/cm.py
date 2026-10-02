@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn, autograd
 from .losses import CrossEntropyLabelSmooth, FocalTopLoss
 from IPython import embed
+from ..methods.rahp import select_rahp_hard
 
 
 class CM(autograd.Function):
@@ -41,9 +42,12 @@ def cm(inputs, indexes, features, momentum=0.5):
 class CM_Hybrid(autograd.Function):
 
     @staticmethod
-    def forward(ctx, inputs, targets, features, momentum):
+    def forward(ctx, inputs, targets, features, momentum, reliability, rahp_beta, rahp_stats):
         ctx.features = features
         ctx.momentum = momentum
+        ctx.reliability = reliability
+        ctx.rahp_beta = rahp_beta
+        ctx.rahp_stats = rahp_stats
         ctx.save_for_backward(inputs, targets)
         outputs = inputs.mm(ctx.features.t())
 
@@ -61,26 +65,53 @@ class CM_Hybrid(autograd.Function):
         for instance_feature, index in zip(inputs, targets.tolist()):
             batch_centers[index].append(instance_feature)
 
+        if ctx.reliability is not None:
+            if ctx.reliability.numel() != inputs.size(0):
+                raise ValueError("feature/label/reliability lengths must match")
+            batch_reliability = collections.defaultdict(list)
+            batch_positions = collections.defaultdict(list)
+            for position, index in enumerate(targets.tolist()):
+                batch_reliability[index].append(ctx.reliability[position])
+                batch_positions[index].append(position)
+
         for index, features in batch_centers.items():
             distances = []
             for feature in features:
                 distance = feature.unsqueeze(0).mm(ctx.features[index].unsqueeze(0).t())[0][0]
                 distances.append(distance.cpu().numpy())
 
+            if ctx.reliability is not None:
+                # Both scores use the old mean slot, before the momentum update.
+                old_center = F.normalize(ctx.features[index].detach(), dim=0)
+                normalized = F.normalize(torch.stack(features), dim=1)
+                hardness = 1.0 - normalized.mv(old_center)
+
             mean = torch.stack(features, dim=0).mean(0)
             ctx.features[index] = ctx.features[index] * ctx.momentum + (1 - ctx.momentum) * mean
             ctx.features[index] /= ctx.features[index].norm()
             
-            hard = np.argmin(np.array(distances))
+            if ctx.reliability is None:
+                hard = np.argmin(np.array(distances))
+            else:
+                hard, candidate_count, percentile = select_rahp_hard(
+                    hardness, batch_reliability[index], ctx.rahp_beta,
+                    batch_positions[index])
+                if ctx.rahp_stats is not None:
+                    ctx.rahp_stats.observe(
+                        int(np.argmin(np.array(distances))), hard,
+                        batch_reliability[index], candidate_count, percentile)
             ctx.features[index+nums] = ctx.features[index+nums] * ctx.momentum + (1 - ctx.momentum) * features[hard]
             ctx.features[index+nums] /= ctx.features[index+nums].norm()
 
 
-        return grad_inputs, None, None, None
+        return grad_inputs, None, None, None, None, None, None
 
 
-def cm_hybrid(inputs, indexes, features, momentum=0.5):
-    return CM_Hybrid.apply(inputs, indexes, features, torch.Tensor([momentum]).to(inputs.device))
+def cm_hybrid(inputs, indexes, features, momentum=0.5, reliability=None,
+              rahp_beta=0.25, rahp_stats=None):
+    return CM_Hybrid.apply(inputs, indexes, features,
+                           torch.Tensor([momentum]).to(inputs.device),
+                           reliability, rahp_beta, rahp_stats)
 
 
 class CM_Hard(autograd.Function):
@@ -154,8 +185,14 @@ class ClusterMemory(nn.Module, ABC):
         else:
             raise TypeError('Cluster Memory {} is invalid!'.format(self.cm_type))
 
-    def forward(self, inputs, targets, model_name='encoder'):
+    def forward(self, inputs, targets, model_name='encoder', reliability=None,
+                rahp_beta=0.25, rahp_stats=None):
         inputs = F.normalize(inputs, dim=1).cuda()
+        if reliability is not None:
+            reliability = torch.as_tensor(reliability, dtype=inputs.dtype,
+                                          device=inputs.device).flatten()
+            if inputs.size(0) != targets.numel() or inputs.size(0) != reliability.numel():
+                raise ValueError("feature/label/reliability lengths must match")
         if self.cm_type == 'CM':
             outputs = cm(inputs, targets, self.features, self.momentum)
             outputs /= self.temp
@@ -163,7 +200,8 @@ class ClusterMemory(nn.Module, ABC):
             return loss
 
         elif self.cm_type == 'CMhybrid':
-            outputs = cm_hybrid(inputs, targets, self.features, self.momentum)
+            outputs = cm_hybrid(inputs, targets, self.features, self.momentum,
+                                reliability, rahp_beta, rahp_stats)
             outputs /= self.temp
             mean, hard = torch.chunk(outputs, 2, dim=1)
             r = 0.2
@@ -172,7 +210,8 @@ class ClusterMemory(nn.Module, ABC):
         
         elif self.cm_type == 'CMhard':
             if model_name == 'encoder':
-                outputs = cm_hybrid(inputs, targets, self.features, self.momentum)
+                outputs = cm_hybrid(inputs, targets, self.features, self.momentum,
+                                    reliability, rahp_beta, rahp_stats)
                 outputs /= self.temp
                 mean, hard = torch.chunk(outputs, 2, dim=1)
                 r = 0.2
