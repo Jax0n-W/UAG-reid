@@ -104,6 +104,11 @@ DATA_DIR=/path/to/AG-ReID-root LOGS_DIR=logs/agreid PRETRAINED_RESNET50=/path/to
 DATA_DIR=/path/to/LAGPeR-root LOGS_DIR=logs/lagper PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_lagper_ablation.sh
 ```
 
+Both scripts default to `EPS=0.6`. A tuning run can set a shared value for all
+four groups with `EPS=0.55 ... bash scripts/run_agreid_ablation.sh` (or the
+LAGPeR script). Use a distinct `LOGS_DIR` for each value. Direct entrypoints
+continue to accept `--eps VALUE`.
+
 The standalone test scripts parameterize all paths and runtime loader settings. AG-ReID reports A to G and G to A. LAGPeR reports A to G, G to A, and G to A+G:
 
 ```bash

@@ -4,6 +4,7 @@ set -euo pipefail
 DATA_DIR="${DATA_DIR:?Set DATA_DIR to the prepared AG-ReID root}"
 LOGS_DIR="${LOGS_DIR:-logs}"
 PRETRAINED_RESNET50="${PRETRAINED_RESNET50:?Set PRETRAINED_RESNET50 to resnet50-19c8e357.pth}"
+EPS="${EPS:-0.6}"
 
 COMMON_ARGS=(
   --dataset agreid_ir
@@ -22,7 +23,7 @@ COMMON_ARGS=(
   --weight-decay 0.0005
   --momentum 0.2
   --step-size 20
-  --eps 0.6
+  --eps "$EPS"
   --eps-gap 0.02
   --k1 30
   --k2 6

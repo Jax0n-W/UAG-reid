@@ -125,6 +125,9 @@ python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/sta
 python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
 ```
 
+The ablation scripts use `eps=0.6` by default. Override the shared value for
+all four groups from the command line, for example `EPS=0.55 LOGS_DIR=logs/agreid_eps055 bash scripts/run_agreid_ablation.sh`. Direct training entrypoints also accept `--eps 0.55`.
+
 LAGPeR requires an externally prepared official four-scene train / three-scene test manifest tree. The deprecated `prepare_lag.py` cannot create it from AG-ReID. See the technical design for the exact contract.
 
 See `docs/rahp-cesa-technical-design.md` for the frozen method definitions and protocol details.

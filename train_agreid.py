@@ -418,9 +418,9 @@ def main():
     args.experiment_tag = experiment_tag(args)
     if args.dry_run:
         print('[CONFIG]\ndataset=AG-ReID\nformal_protocol=A-to-G,G-to-A\n'
-              'arch={}\nmemorybank={}\ncheckpoint=fixed-final\n'
+              'arch={}\nmemorybank={}\neps={}\ncheckpoint=fixed-final\n'
               'eval_during_train={}\nrahp={}\ncesa={}'.format(
-                  args.arch, args.memorybank, args.eval_during_train,
+                  args.arch, args.memorybank, args.eps, args.eval_during_train,
                   args.use_rahp, args.use_cesa))
         return
     # ========== AGVA 参数合法性检查 ==========

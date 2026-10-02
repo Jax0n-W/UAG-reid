@@ -324,8 +324,8 @@ def main():
     if args.dry_run:
         print('[CONFIG]\ndataset=LAGPeR\nprotocol=official-scene-split\n'
               'train_scenes=4\ntest_scenes=3\narch={}\nmemorybank={}\n'
-              'checkpoint=fixed-final\neval_during_train={}\nrahp={}\ncesa={}'.format(
-                  args.arch, args.memorybank, args.eval_during_train,
+              'eps={}\ncheckpoint=fixed-final\neval_during_train={}\nrahp={}\ncesa={}'.format(
+                  args.arch, args.memorybank, args.eps, args.eval_during_train,
                   args.use_rahp, args.use_cesa))
         return
     if args.seed is not None:

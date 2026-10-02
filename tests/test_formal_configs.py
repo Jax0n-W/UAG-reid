@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 import shlex
+import subprocess
+import sys
 import unittest
 
 
@@ -18,7 +20,7 @@ REQUIRED = {
     '--weight-decay': '0.0005',
     '--momentum': '0.2',
     '--step-size': '20',
-    '--eps': '0.6',
+    '--eps': '$EPS',
     '--k1': '30',
     '--k2': '6',
     '--temp': '0.05',
@@ -64,10 +66,19 @@ class FormalConfigTests(unittest.TestCase):
             self.assertEqual(run_lines, expected_runs)
             self.assertNotIn('--use-rahp', tokens)
             self.assertNotIn('--use-cesa', tokens)
+            self.assertIn('EPS="${EPS:-0.6}"', source)
 
     def test_frozen_batch_contains_complete_sampler_groups(self):
         self.assertGreaterEqual(64, 2 * 16)
         self.assertEqual((64 // 2) % 16, 0)
+
+    def test_eps_cli_override_is_visible_in_dry_run(self):
+        for script in ('train_agreid.py', 'train_lag.py'):
+            completed = subprocess.run(
+                [sys.executable, str(ROOT / script), '--eps', '0.55',
+                 '--dry-run'], cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn('eps=0.55', completed.stdout)
 
 
 if __name__ == '__main__':
