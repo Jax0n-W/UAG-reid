@@ -34,6 +34,7 @@ from clustercontrast.methods.checkpoint import (
     capture_rng_state, final_checkpoint_path, restore_rng_state,
     save_fixed_epoch_checkpoint, should_evaluate_during_train,
 )
+from clustercontrast.methods.pgm import build_total_pgm_mapping
 from clustercontrast.trainers import ClusterContrastTrainer_DCL, ClusterContrastTrainer_PCLMP
 from clustercontrast.evaluators import Evaluator, extract_features
 from clustercontrast.utils.data import IterLoader
@@ -49,7 +50,6 @@ from torch.autograd import Variable
 import math
 from ChannelAug import ChannelAdap, ChannelAdapGray, ChannelRandomErasing,ChannelExchange,Gray
 from collections import Counter
-from scipy.optimize import linear_sum_assignment
 def get_data(name, data_dir,trial=0):
     # Both AG-ReID modalities share one root.  The modality and trial are
     # selected inside agreid_ir/agreid_rgb, matching the server data tree.
@@ -1151,7 +1151,6 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
         i2r = {}
         r2i = {}
         R = []
-        bgm = False
         pgm_executed = num_cluster_rgb > 0 and num_cluster_ir > 0
         if pgm_executed:
             # clusternorm
@@ -1168,31 +1167,17 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
             similarity = calibrated_score.exp().cpu()
             dis_similarity = (1 / (similarity))
             cost = dis_similarity / 1
-            # scipy solves rectangular assignments directly.  This chooses
-            # min(num_rgb, num_ir) one-to-one edges in either orientation.
-            row_ind, col_ind = linear_sum_assignment(cost)
-            matched_rows = set()
-            for row, column in zip(row_ind, col_ind):
-                row = int(row)
-                column = int(column)
-                matched_rows.add(row)
-                R.append((row, column))
-                r2i[row] = column
-                i2r[column] = row
-
-            # Preserve the frozen unmatched-ground completion for the
-            # num_rgb > num_ir case.  When num_rgb <= num_ir this is empty.
-            unmatched_row = sorted(
-                set(range(dis_similarity.shape[0])) - matched_rows)
-            if bgm is False and unmatched_row:
-                unmatched_cost = cost[unmatched_row]
-                unmatched_row_ind, unmatched_col_ind = linear_sum_assignment(unmatched_cost)
-                for local_row, column in zip(
-                        unmatched_row_ind, unmatched_col_ind):
-                    row = int(unmatched_row[int(local_row)])
-                    column = int(column)
-                    R.append((row, column))
-                    r2i[row] = column
+            R, r2i, i2r, pgm_diag = build_total_pgm_mapping(cost)
+            print('[PGM] ground_clusters={} aerial_clusters={}'.format(
+                pgm_diag['ground_clusters'], pgm_diag['aerial_clusters']))
+            print('[PGM] core_matches={}'.format(pgm_diag['core_matches']))
+            print('[PGM] ground_completion={} aerial_completion={}'.format(
+                pgm_diag['ground_completion'],
+                pgm_diag['aerial_completion']))
+            print('[PGM] total_edges={}'.format(pgm_diag['total_edges']))
+            print('[PGM] r2i_coverage={}/{} i2r_coverage={}/{}'.format(
+                pgm_diag['r2i_coverage'], pgm_diag['ground_clusters'],
+                pgm_diag['i2r_coverage'], pgm_diag['aerial_clusters']))
             del cluster_features_ir, cluster_features_rgb
 
         print("Finish Bipartite Graph Matching")
