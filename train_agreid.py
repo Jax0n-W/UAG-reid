@@ -31,13 +31,13 @@ from clustercontrast.methods.cli import (
     add_method_arguments, experiment_tag, parse_bool, validate_method_args,
 )
 from clustercontrast.methods.checkpoint import (
-    BEST_SELECTION_METRIC, capture_rng_state, final_checkpoint_path,
-    restore_best_state, restore_rng_state, save_best_checkpoint,
-    save_fixed_epoch_checkpoint, select_agreid_best,
+    BEST_SELECTION_METRIC, capture_rng_state,
+    resolve_stage1_initialization, restore_best_state, restore_rng_state,
+    save_best_checkpoint, save_fixed_epoch_checkpoint, select_agreid_best,
     should_evaluate_during_train,
 )
 from clustercontrast.methods.evaluation import (
-    evaluate_agreid_direction, evaluate_agreid_distances,
+    evaluate_agreid_bidirectional, evaluate_agreid_distances,
     extract_agreid_features, load_agreid_split,
 )
 from clustercontrast.methods.pgm import build_total_pgm_mapping
@@ -276,18 +276,18 @@ def eval_regdb(distmat, q_pids, g_pids, max_rank = 20):
     return evaluate_agreid_distances(distmat, q_pids, g_pids, max_rank)
 
 
-def _print_agreid_metrics(epoch, direction, metrics):
-    print('[EVAL][Stage2][Epoch {:03d}][{}]'.format(
-        epoch, direction.upper()))
+def _print_agreid_metrics(stage, epoch, direction, metrics):
+    print('[EVAL][{}][Epoch {:03d}][{}]'.format(
+        stage, epoch, direction.upper()))
     print('Rank-1={rank1:.4f} Rank-5={rank5:.4f} '
           'Rank-10={rank10:.4f} Rank-20={rank20:.4f} '
           'mAP={mAP:.4f} mINP={mINP:.4f}'.format(**metrics))
 
 
-def evaluate_stage2_agreid(model_ema, args, data_path, trial):
-    """Run canonical A-to-G and G-to-A evaluation without changing RNG."""
+def evaluate_agreid_for_training(model, args, data_path, trial):
+    """Run canonical bidirectional evaluation without changing training state."""
     rng_state = capture_rng_state()
-    was_training = model_ema.training
+    was_training = model.training
     try:
         normalize = T.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -313,17 +313,13 @@ def evaluate_stage2_agreid(model_ema, args, data_path, trial):
             batch_size=args.test_batch, shuffle=False,
             num_workers=args.workers)
 
-        model_ema.eval()
+        model.eval()
         with torch.no_grad():
-            a2g = evaluate_agreid_direction(
-                model_ema, 'a2g', aerial_loader, aerial_labels,
+            return evaluate_agreid_bidirectional(
+                model, aerial_loader, aerial_labels,
                 ground_loader, ground_labels)
-            g2a = evaluate_agreid_direction(
-                model_ema, 'g2a', ground_loader, ground_labels,
-                aerial_loader, aerial_labels)
-        return a2g, g2a
     finally:
-        model_ema.train(was_training)
+        model.train(was_training)
         restore_rng_state(rng_state)
 
 
@@ -355,10 +351,11 @@ def main():
     args.experiment_tag = experiment_tag(args)
     if args.dry_run:
         print('[CONFIG]\ndataset=AG-ReID\nformal_protocol=A-to-G,G-to-A\n'
-              'arch={}\nmemorybank={}\neps={}\ncheckpoint=fixed-final\n'
+              'arch={}\nmemorybank={}\neps={}\nstage1_init={}\n'
+              'checkpoint=fixed-final+best\n'
               'eval_during_train={}\nrahp={}\ncesa={}'.format(
-                  args.arch, args.memorybank, args.eps, args.eval_during_train,
-                  args.use_rahp, args.use_cesa))
+                  args.arch, args.memorybank, args.eps, args.stage1_init,
+                  args.eval_during_train, args.use_rahp, args.use_cesa))
         return
     # ========== AGVA 参数合法性检查 ==========
     if not (0.0 <= args.agva_ir_prob <= 1.0):
@@ -447,6 +444,8 @@ def main_worker_stage1(args,log_s1_name):
 
     # Trainer
     trainer = ClusterContrastTrainer_DCL(model)
+    best_R1 = float('-inf')
+    best_epoch = None
 
     for epoch in range(args.epochs):
         with torch.no_grad():
@@ -690,56 +689,37 @@ def main_worker_stage1(args,log_s1_name):
                       rahp_beta=args.rahp_beta, rahp_stats=rahp_stats)
         print(format_rahp_epoch(rahp_diags, rahp_stats, args.use_rahp))
 
+        eval_a2g = None
+        eval_g2a = None
+        best_updated = False
         if should_evaluate_during_train(args, epoch):
-##############################
-            args.test_batch=64
-            args.img_w=args.width
-            args.img_h=args.height
-            normalize = T.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-            transform_test = T.Compose([
-                T.ToPILImage(),
-                T.Resize((args.img_h,args.img_w)),
-                T.ToTensor(),
-                normalize,
-            ])
-            mode='all'
-            data_path=data_dir
-            # AG-ReID: visible (ground/C03) -> query, thermal (aerial/C00) -> gallery
-            query_img, query_label = process_test_agreid(data_path, trial=trial, modal='ground')
-            gall_img, gall_label = process_test_agreid(data_path, trial=trial, modal='aerial')
+            eval_a2g, eval_g2a = evaluate_agreid_for_training(
+                model, args, data_dir, trial)
+            _print_agreid_metrics('Stage1', epoch + 1, 'a2g', eval_a2g)
+            _print_agreid_metrics('Stage1', epoch + 1, 'g2a', eval_g2a)
+            best_R1, best_epoch, best_updated = select_agreid_best(
+                eval_a2g, eval_g2a, best_R1, best_epoch, epoch + 1)
+            print('[BEST][Stage1]\nselection_metric={} current={:.4f} '
+                  'best={:.4f} best_epoch={} updated={}'.format(
+                      BEST_SELECTION_METRIC, eval_g2a['rank1'], best_R1,
+                      best_epoch, best_updated))
 
-            gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-            gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
-            nquery = len(query_label)
-            ngall = len(gall_label)
-            queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-            query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=4)
-            query_feat_fc = extract_query_feat(model,query_loader,nquery)
-            # for trial in range(1):
-            ngall = len(gall_label)
-            gall_feat_fc = extract_gall_feat(model,gall_loader,ngall)
-            # fc feature
-            distmat = np.matmul(query_feat_fc, np.transpose(gall_feat_fc))
-            cmc, mAP, mINP = eval_regdb(-distmat, query_label, gall_label)
-
-
-            print('Test Trial: {}'.format(trial))
-            print(
-                'FC:   Rank-1: {:.2%} | Rank-5: {:.2%} | Rank-10: {:.2%}| Rank-20: {:.2%}| mAP: {:.2%}| mINP: {:.2%}'.format(
-                    cmc[0], cmc[4], cmc[9], cmc[19], mAP, mINP))
-
-            print(
-                '\n * Debug evaluation epoch {:3d}   model R1: {:5.1%}  model mAP: {:5.1%}\n'.
-                format(epoch, cmc[0], mAP))
-############################
         checkpoint_state = {
             'state_dict': model.state_dict(),
             'epoch': epoch + 1,
+            'best_R1': best_R1,
+            'best_epoch': best_epoch,
+            'selection_metric': BEST_SELECTION_METRIC,
+            'eval_g2a': eval_g2a,
+            'eval_a2g': eval_a2g,
         }
+        if best_updated:
+            best_path = save_best_checkpoint(checkpoint_state, args.logs_dir)
+            print('[CHECKPOINT][Stage1]\nbest epoch={} metric={} path={}'.format(
+                best_epoch, BEST_SELECTION_METRIC, best_path))
         _, final_path = save_fixed_epoch_checkpoint(
             checkpoint_state, args.logs_dir, epoch + 1 == args.epochs)
-        print('[CHECKPOINT] latest epoch={} policy=fixed-final{}'.format(
+        print('[CHECKPOINT][Stage1] latest epoch={} policy=fixed-final{}'.format(
             epoch + 1, ' final={}'.format(final_path) if final_path else ''))
         lr_scheduler.step()
     end_time = time.monotonic()
@@ -761,6 +741,10 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
     sys.stdout = Logger(osp.join(args.logs_dir, str(trial)+'log.txt'))
     print("==========\nArgs:{}\n==========".format(args))
 
+    stage1_directory = osp.join(logs_root, log_s1_name, str(trial))
+    stage1_checkpoint = resolve_stage1_initialization(
+        stage1_directory, args.stage1_init, stage2_resume=bool(args.resume))
+
     # Create datasets
     iters = args.iters if (args.iters > 0) else None
     print("==> Load unlabeled dataset")
@@ -771,9 +755,10 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
     test_loader_rgb = get_test_loader(dataset_rgb, args.height, args.width, args.batch_size, args.workers)
     # Create model
     model, model_ema = create_model(args)
-    if not args.resume:
-        checkpoint = load_checkpoint(final_checkpoint_path(
-            osp.join(logs_root, log_s1_name, str(trial))))
+    if stage1_checkpoint is not None:
+        print('[INIT][Stage2] stage1_source={} path={}'.format(
+            args.stage1_init, stage1_checkpoint))
+        checkpoint = load_checkpoint(stage1_checkpoint)
         model.load_state_dict(checkpoint['state_dict'])
         model_ema.load_state_dict(checkpoint['state_dict'])
     # Optimizer
@@ -1199,13 +1184,13 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
         eval_g2a = None
         best_updated = False
         if should_evaluate_during_train(args, epoch):
-            eval_a2g, eval_g2a = evaluate_stage2_agreid(
+            eval_a2g, eval_g2a = evaluate_agreid_for_training(
                 model_ema, args, data_dir, trial)
-            _print_agreid_metrics(epoch + 1, 'a2g', eval_a2g)
-            _print_agreid_metrics(epoch + 1, 'g2a', eval_g2a)
+            _print_agreid_metrics('Stage2', epoch + 1, 'a2g', eval_a2g)
+            _print_agreid_metrics('Stage2', epoch + 1, 'g2a', eval_g2a)
             best_R1, best_epoch, best_updated = select_agreid_best(
                 eval_a2g, eval_g2a, best_R1, best_epoch, epoch + 1)
-            print('[BEST]\nselection_metric={} current={:.4f} best={:.4f} '
+            print('[BEST][Stage2]\nselection_metric={} current={:.4f} best={:.4f} '
                   'best_epoch={} updated={}'.format(
                       BEST_SELECTION_METRIC, eval_g2a['rank1'], best_R1,
                       best_epoch, best_updated))
@@ -1286,7 +1271,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval-step', type=int, default=1)
     parser.add_argument('--eval-during-train', type=parse_bool, nargs='?',
                         const=True, default=False,
-                        help='evaluate Stage2 and retain the best G-to-A Rank-1 checkpoint')
+                        help='evaluate each stage and retain its best G-to-A Rank-1 checkpoint')
     parser.add_argument('--trial', type=int, default=1)
     parser.add_argument('--temp', type=float, default=0.05,
                         help="temperature for scaling contrastive loss")
@@ -1303,6 +1288,9 @@ if __name__ == '__main__':
     parser.add_argument('--no-cam',  action="store_true")
     parser.add_argument('--stage2-only', action='store_true',
                         help='skip Stage 1 and load checkpoint from Stage 1')
+    parser.add_argument('--stage1-init', choices=['final', 'best'],
+                        default='final',
+                        help='Stage1 checkpoint used to initialize fresh Stage2')
     parser.add_argument('--resume', type=str, default='',
                         help='resume Stage 2 from a checkpoint')
     parser.add_argument('--dry-run', action='store_true',

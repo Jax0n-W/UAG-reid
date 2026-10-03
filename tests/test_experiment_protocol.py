@@ -31,10 +31,12 @@ class ExperimentProtocolTests(unittest.TestCase):
             self.assertEqual(final['epoch'], 3)
             self.assertEqual(latest['epoch'], 3)
 
-    def test_stage2_loads_stage1_final_checkpoint(self):
-        for script in ('train_agreid.py', 'train_lag.py'):
-            source = (ROOT / script).read_text(encoding='utf-8')
-            self.assertIn('final_checkpoint_path(', source)
+    def test_stage2_stage1_initialization_protocol_is_explicit(self):
+        agreid_source = (ROOT / 'train_agreid.py').read_text(encoding='utf-8')
+        lag_source = (ROOT / 'train_lag.py').read_text(encoding='utf-8')
+        self.assertIn('resolve_stage1_initialization(', agreid_source)
+        self.assertIn("default='final'", agreid_source)
+        self.assertIn('final_checkpoint_path(', lag_source)
 
     def test_evaluation_gate_defaults_off_and_never_controls_saving(self):
         args = SimpleNamespace(eval_during_train=False, eval_step=1)

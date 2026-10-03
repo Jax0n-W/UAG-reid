@@ -20,8 +20,8 @@ from clustercontrast.methods.checkpoint import (
     should_evaluate_during_train,
 )
 from clustercontrast.methods.evaluation import (
-    evaluate_agreid_direction, evaluate_agreid_distances,
-    extract_agreid_features,
+    evaluate_agreid_bidirectional, evaluate_agreid_direction,
+    evaluate_agreid_distances, extract_agreid_features,
 )
 from clustercontrast.utils.serialization import load_torch_file
 from test_agreid import eval_agreid
@@ -138,6 +138,21 @@ class AGReIDOnlineEvaluationTests(unittest.TestCase):
                 object(), np.asarray([0]))
             self.assertEqual([call.args[3] for call in extract.call_args_list], [1, 2])
 
+    def test_bidirectional_evaluation_extracts_each_modality_once(self):
+        features = [np.asarray([[1.0, 0.0]]), np.asarray([[1.0, 0.0]])]
+        with mock.patch(
+                'clustercontrast.methods.evaluation.extract_agreid_features',
+                side_effect=features) as extract:
+            a2g, g2a = evaluate_agreid_bidirectional(
+                object(), object(), np.asarray([0]),
+                object(), np.asarray([0]))
+
+        self.assertEqual(
+            [call.kwargs['modal'] for call in extract.call_args_list], [2, 1])
+        self.assertEqual(extract.call_count, 2)
+        self.assertEqual(a2g['rank1'], 1.0)
+        self.assertEqual(g2a['rank1'], 1.0)
+
     def test_train_and_formal_evaluators_are_identical(self):
         query_labels = np.asarray([0, 1])
         gallery_labels = np.asarray([0, 1] * 10)
@@ -180,7 +195,7 @@ class AGReIDOnlineEvaluationTests(unittest.TestCase):
             evaluate_agreid_distances(
                 np.asarray([[0.0]]), np.asarray([0]), np.asarray([1]))
 
-    def test_stage2_evaluation_restores_rng_and_model_mode(self):
+    def test_training_evaluation_restores_rng_and_model_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             index_dir = Path(directory) / 'idx'
             index_dir.mkdir()
@@ -210,9 +225,10 @@ class AGReIDOnlineEvaluationTests(unittest.TestCase):
                 return _metrics(0.5)
 
             with mock.patch(
-                    'train_agreid.evaluate_agreid_direction',
+                    'train_agreid.evaluate_agreid_bidirectional',
                     side_effect=consume_rng):
-                train_agreid.evaluate_stage2_agreid(model, args, directory, 1)
+                train_agreid.evaluate_agreid_for_training(
+                    model, args, directory, 1)
 
             actual = (random.random(), np.random.random(), torch.rand(1))
             self.assertEqual(actual[0], expected[0])

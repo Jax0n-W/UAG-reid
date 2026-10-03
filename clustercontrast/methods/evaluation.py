@@ -131,15 +131,8 @@ def _rank_at(cmc, rank):
     return float(cmc[min(rank, len(cmc)) - 1])
 
 
-def evaluate_agreid_direction(model, direction, query_loader, query_labels,
-                              gallery_loader, gallery_labels):
-    query_name, query_modal, gallery_name, gallery_modal = \
-        agreid_direction_modalities(direction)
-    del query_name, gallery_name
-    query_features = extract_agreid_features(
-        model, query_loader, len(query_labels), query_modal)
-    gallery_features = extract_agreid_features(
-        model, gallery_loader, len(gallery_labels), gallery_modal)
+def evaluate_agreid_feature_pair(query_features, query_labels,
+                                 gallery_features, gallery_labels):
     similarity = np.matmul(query_features, gallery_features.T)
     cmc, m_ap, m_inp = evaluate_agreid_distances(
         -similarity, query_labels, gallery_labels)
@@ -155,6 +148,33 @@ def evaluate_agreid_direction(model, direction, query_loader, query_labels,
                for value in metrics.values()):
         raise RuntimeError('AG-ReID evaluation produced invalid metrics')
     return metrics
+
+
+def evaluate_agreid_direction(model, direction, query_loader, query_labels,
+                              gallery_loader, gallery_labels):
+    query_name, query_modal, gallery_name, gallery_modal = \
+        agreid_direction_modalities(direction)
+    del query_name, gallery_name
+    query_features = extract_agreid_features(
+        model, query_loader, len(query_labels), query_modal)
+    gallery_features = extract_agreid_features(
+        model, gallery_loader, len(gallery_labels), gallery_modal)
+    return evaluate_agreid_feature_pair(
+        query_features, query_labels, gallery_features, gallery_labels)
+
+
+def evaluate_agreid_bidirectional(model, aerial_loader, aerial_labels,
+                                  ground_loader, ground_labels):
+    """Evaluate both directions after extracting each modality once."""
+    aerial_features = extract_agreid_features(
+        model, aerial_loader, len(aerial_labels), modal=2)
+    ground_features = extract_agreid_features(
+        model, ground_loader, len(ground_labels), modal=1)
+    a2g = evaluate_agreid_feature_pair(
+        aerial_features, aerial_labels, ground_features, ground_labels)
+    g2a = evaluate_agreid_feature_pair(
+        ground_features, ground_labels, aerial_features, aerial_labels)
+    return a2g, g2a
 
 
 def load_agw_checkpoint_strict(model, checkpoint):

@@ -21,6 +21,24 @@ def best_checkpoint_path(directory):
     return os.path.join(directory, BEST_CHECKPOINT)
 
 
+def resolve_stage1_initialization(directory, source, stage2_resume=False):
+    """Resolve the explicitly selected Stage1 source for a fresh Stage2."""
+    if stage2_resume:
+        return None
+    if source == 'final':
+        path = final_checkpoint_path(directory)
+    elif source == 'best':
+        path = best_checkpoint_path(directory)
+    else:
+        raise ValueError('Stage1 initialization must be final or best')
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            'Requested Stage1 {} checkpoint does not exist: {}. '
+            'Use --eval-during-train=True to produce a best checkpoint.'
+            .format(source, path))
+    return path
+
+
 def save_fixed_epoch_checkpoint(state, directory, is_final_epoch):
     """Always save latest state and also save the predetermined final epoch."""
     os.makedirs(directory, exist_ok=True)
