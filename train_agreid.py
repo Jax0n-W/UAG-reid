@@ -31,8 +31,14 @@ from clustercontrast.methods.cli import (
     add_method_arguments, experiment_tag, parse_bool, validate_method_args,
 )
 from clustercontrast.methods.checkpoint import (
-    capture_rng_state, final_checkpoint_path, restore_rng_state,
-    save_fixed_epoch_checkpoint, should_evaluate_during_train,
+    BEST_SELECTION_METRIC, capture_rng_state, final_checkpoint_path,
+    restore_best_state, restore_rng_state, save_best_checkpoint,
+    save_fixed_epoch_checkpoint, select_agreid_best,
+    should_evaluate_during_train,
+)
+from clustercontrast.methods.evaluation import (
+    evaluate_agreid_direction, evaluate_agreid_distances,
+    extract_agreid_features, load_agreid_split,
 )
 from clustercontrast.methods.pgm import build_total_pgm_mapping
 from clustercontrast.trainers import ClusterContrastTrainer_DCL, ClusterContrastTrainer_PCLMP
@@ -46,7 +52,6 @@ from clustercontrast.utils.faiss_rerank import compute_jaccard_distance,compute_
 from clustercontrast.utils.data.sampler import RandomMultipleGallerySampler, RandomMultipleGallerySamplerNoCam
 import os
 import torch.utils.data as data
-from torch.autograd import Variable
 import math
 from ChannelAug import ChannelAdap, ChannelAdapGray, ChannelRandomErasing,ChannelExchange,Gray
 from collections import Counter
@@ -258,143 +263,69 @@ class TestData(data.Dataset):
     def __len__(self):
         return len(self.test_image)
 
-def fliplr(img):
-    '''flip horizontal'''
-    inv_idx = torch.arange(img.size(3)-1,-1,-1).long()  # N x C x H x W
-    img_flip = img.index_select(3,inv_idx)
-    return img_flip
 def extract_gall_feat(model,gall_loader,ngall):
-    pool_dim=2048
-    net = model
-    net.eval()
-    print ('Extracting Gallery Feature...')
-    start = time.time()
-    ptr = 0
-    gall_feat_pool = np.zeros((ngall, pool_dim))
-    gall_feat_fc = np.zeros((ngall, pool_dim))
-    with torch.no_grad():
-        for batch_idx, (input, label ) in enumerate(gall_loader):
-            batch_num = input.size(0)
-            flip_input = fliplr(input)
-            input = Variable(input.cuda())
-            feat_fc = net( input,input, 2)
-            flip_input = Variable(flip_input.cuda())
-            feat_fc_1 = net( flip_input,flip_input, 2)
-            feature_fc = (feat_fc.detach() + feat_fc_1.detach())/2
-            fnorm_fc = torch.norm(feature_fc, p=2, dim=1, keepdim=True)
-            feature_fc = feature_fc.div(fnorm_fc.expand_as(feature_fc))
-            gall_feat_fc[ptr:ptr+batch_num,: ]   = feature_fc.cpu().numpy()
-            ptr = ptr + batch_num
-    print('Extracting Time:\t {:.3f}'.format(time.time()-start))
-    return gall_feat_fc
+    return extract_agreid_features(model, gall_loader, ngall, modal=2)
     
 def extract_query_feat(model,query_loader,nquery):
-    pool_dim=2048
-    net = model
-    net.eval()
-    print ('Extracting Query Feature...')
-    start = time.time()
-    ptr = 0
-    query_feat_pool = np.zeros((nquery, pool_dim))
-    query_feat_fc = np.zeros((nquery, pool_dim))
-    with torch.no_grad():
-        for batch_idx, (input, label ) in enumerate(query_loader):
-            batch_num = input.size(0)
-            flip_input = fliplr(input)
-            input = Variable(input.cuda())
-            feat_fc = net( input, input,1)
-            flip_input = Variable(flip_input.cuda())
-            feat_fc_1 = net( flip_input,flip_input, 1)
-            feature_fc = (feat_fc.detach() + feat_fc_1.detach())/2
-            fnorm_fc = torch.norm(feature_fc, p=2, dim=1, keepdim=True)
-            feature_fc = feature_fc.div(fnorm_fc.expand_as(feature_fc))
-            query_feat_fc[ptr:ptr+batch_num,: ]   = feature_fc.cpu().numpy()
-            
-            ptr = ptr + batch_num         
-    print('Extracting Time:\t {:.3f}'.format(time.time()-start))
-    return query_feat_fc
+    return extract_agreid_features(model, query_loader, nquery, modal=1)
 
 
 def process_test_agreid(img_dir, trial=1, modal='ground'):
-    if modal == 'ground':
-        input_data_path = osp.join(img_dir, 'idx/test_ground_{}.txt'.format(trial))
-    elif modal == 'aerial':
-        input_data_path = osp.join(img_dir, 'idx/test_aerial_{}.txt'.format(trial))
-    else:
-        raise ValueError("AG-ReID modal must be 'ground' or 'aerial'")
-    
-    with open(input_data_path) as f:
-        data_file_list = open(input_data_path, 'rt').read().splitlines()
-        # Get full list of image and labels
-        # idx files contain relative paths: bounding_box_test_ground/xxx.jpg label
-        file_image = [osp.join(img_dir, s.split(' ')[0]) for s in data_file_list]
-        file_label = [int(s.split(' ')[1]) for s in data_file_list]
-        
-    return file_image, np.array(file_label)
+    return load_agreid_split(img_dir, trial, modal)
 def eval_regdb(distmat, q_pids, g_pids, max_rank = 20):
-    num_q, num_g = distmat.shape
-    if num_g < max_rank:
-        max_rank = num_g
-        print("Note: number of gallery samples is quite small, got {}".format(num_g))
-    indices = np.argsort(distmat, axis=1)
-    matches = (g_pids[indices] == q_pids[:, np.newaxis]).astype(np.int32)
+    return evaluate_agreid_distances(distmat, q_pids, g_pids, max_rank)
 
-    # compute cmc curve for each query
-    all_cmc = []
-    all_AP = []
-    all_INP = []
-    num_valid_q = 0. # number of valid query
-    
-    # only two cameras
-    q_camids = np.ones(num_q).astype(np.int32)
-    g_camids = 2* np.ones(num_g).astype(np.int32)
-    
-    for q_idx in range(num_q):
-        # get query pid and camid
-        q_pid = q_pids[q_idx]
-        q_camid = q_camids[q_idx]
 
-        # remove gallery samples that have the same pid and camid with query
-        order = indices[q_idx]
-        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
-        keep = np.invert(remove)
+def _print_agreid_metrics(epoch, direction, metrics):
+    print('[EVAL][Stage2][Epoch {:03d}][{}]'.format(
+        epoch, direction.upper()))
+    print('Rank-1={rank1:.4f} Rank-5={rank5:.4f} '
+          'Rank-10={rank10:.4f} Rank-20={rank20:.4f} '
+          'mAP={mAP:.4f} mINP={mINP:.4f}'.format(**metrics))
 
-        # compute cmc curve
-        raw_cmc = matches[q_idx][keep] # binary vector, positions with value 1 are correct matches
-        if not np.any(raw_cmc):
-            # this condition is true when query identity does not appear in gallery
-            continue
 
-        cmc = raw_cmc.cumsum()
+def evaluate_stage2_agreid(model_ema, args, data_path, trial):
+    """Run canonical A-to-G and G-to-A evaluation without changing RNG."""
+    rng_state = capture_rng_state()
+    was_training = model_ema.training
+    try:
+        normalize = T.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225])
+        transform_test = T.Compose([
+            T.ToPILImage(),
+            T.Resize((args.height, args.width)),
+            T.ToTensor(),
+            normalize,
+        ])
+        aerial_images, aerial_labels = process_test_agreid(
+            data_path, trial=trial, modal='aerial')
+        ground_images, ground_labels = process_test_agreid(
+            data_path, trial=trial, modal='ground')
+        aerial_loader = data.DataLoader(
+            TestData(aerial_images, aerial_labels, transform=transform_test,
+                     img_size=(args.width, args.height)),
+            batch_size=args.test_batch, shuffle=False,
+            num_workers=args.workers)
+        ground_loader = data.DataLoader(
+            TestData(ground_images, ground_labels, transform=transform_test,
+                     img_size=(args.width, args.height)),
+            batch_size=args.test_batch, shuffle=False,
+            num_workers=args.workers)
 
-        # compute mINP
-        # refernece Deep Learning for Person Re-identification: A Survey and Outlook
-        pos_idx = np.where(raw_cmc == 1)
-        pos_max_idx = np.max(pos_idx)
-        inp = cmc[pos_max_idx]/ (pos_max_idx + 1.0)
-        all_INP.append(inp)
+        model_ema.eval()
+        with torch.no_grad():
+            a2g = evaluate_agreid_direction(
+                model_ema, 'a2g', aerial_loader, aerial_labels,
+                ground_loader, ground_labels)
+            g2a = evaluate_agreid_direction(
+                model_ema, 'g2a', ground_loader, ground_labels,
+                aerial_loader, aerial_labels)
+        return a2g, g2a
+    finally:
+        model_ema.train(was_training)
+        restore_rng_state(rng_state)
 
-        cmc[cmc > 1] = 1
-
-        all_cmc.append(cmc[:max_rank])
-        num_valid_q += 1.
-
-        # compute average precision
-        # reference: https://en.wikipedia.org/wiki/Evaluation_measures_(information_retrieval)#Average_precision
-        num_rel = raw_cmc.sum()
-        tmp_cmc = raw_cmc.cumsum()
-        tmp_cmc = [x / (i+1.) for i, x in enumerate(tmp_cmc)]
-        tmp_cmc = np.asarray(tmp_cmc) * raw_cmc
-        AP = tmp_cmc.sum() / num_rel
-        all_AP.append(AP)
-
-    assert num_valid_q > 0, "Error: all query identities do not appear in gallery"
-
-    all_cmc = np.asarray(all_cmc).astype(np.float32)
-    all_cmc = all_cmc.sum(0) / num_valid_q
-    mAP = np.mean(all_AP)
-    mINP = np.mean(all_INP)
-    return all_cmc, mAP, mINP
 
 def associated_analysis_for_all(all_origin, num_ground_samples, log_dir):
     del log_dir
@@ -855,6 +786,8 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
                             lineage_threshold=args.cesa_lineage_thr,
                             warmup=args.cesa_warmup) if args.use_cesa else None)
     resume_cluster_eps = None
+    best_R1 = float('-inf')
+    best_epoch = None
 
     if args.resume:
         resumed = load_checkpoint(args.resume)
@@ -867,6 +800,7 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
             lr_scheduler.step()  # checkpoint is saved before the end-of-epoch step
         start_epoch = int(resumed['epoch'])
         resume_cluster_eps = resumed.get('dbscan_eps')
+        best_R1, best_epoch = restore_best_state(resumed)
         restore_rng_state(resumed.get('rng_state'))
         if cesa_state is not None:
             cesa_state.load_state_dict(resumed.get('cesa_state'))
@@ -1261,49 +1195,21 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
                       rahp_beta=args.rahp_beta, rahp_stats=rahp_stats)
         print(format_rahp_epoch(rahp_diags, rahp_stats, args.use_rahp))
 
+        eval_a2g = None
+        eval_g2a = None
+        best_updated = False
         if should_evaluate_during_train(args, epoch):
-##############################
-            args.test_batch=64
-            args.img_w=args.width
-            args.img_h=args.height
-            normalize = T.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-            transform_test = T.Compose([
-                T.ToPILImage(),
-                T.Resize((args.img_h,args.img_w)),
-                T.ToTensor(),
-                normalize,
-            ])
+            eval_a2g, eval_g2a = evaluate_stage2_agreid(
+                model_ema, args, data_dir, trial)
+            _print_agreid_metrics(epoch + 1, 'a2g', eval_a2g)
+            _print_agreid_metrics(epoch + 1, 'g2a', eval_g2a)
+            best_R1, best_epoch, best_updated = select_agreid_best(
+                eval_a2g, eval_g2a, best_R1, best_epoch, epoch + 1)
+            print('[BEST]\nselection_metric={} current={:.4f} best={:.4f} '
+                  'best_epoch={} updated={}'.format(
+                      BEST_SELECTION_METRIC, eval_g2a['rank1'], best_R1,
+                      best_epoch, best_updated))
 
-            data_path=data_dir
-            # AG-ReID: visible (ground/C03) -> query, thermal (aerial/C00) -> gallery
-            query_img, query_label = process_test_agreid(data_path, trial=trial, modal='ground')
-            gall_img, gall_label = process_test_agreid(data_path, trial=trial, modal='aerial')
-
-            gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-            gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
-            nquery = len(query_label)
-            ngall = len(gall_label)
-            queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-            query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=4)
-            query_feat_fc = extract_query_feat(model_ema,query_loader,nquery)
-            # for trial in range(1):
-            ngall = len(gall_label)
-            gall_feat_fc = extract_gall_feat(model_ema,gall_loader,ngall)
-            # fc feature
-            distmat = np.matmul(query_feat_fc, np.transpose(gall_feat_fc))
-            cmc, mAP, mINP = eval_regdb(-distmat, query_label, gall_label)
-
-
-            print('Test Trial: {}'.format(trial))
-            print(
-                'FC:   Rank-1: {:.2%} | Rank-5: {:.2%} | Rank-10: {:.2%}| Rank-20: {:.2%}| mAP: {:.2%}| mINP: {:.2%}'.format(
-                    cmc[0], cmc[4], cmc[9], cmc[19], mAP, mINP))
-
-            print(
-                '\n * Debug evaluation epoch {:3d}   model R1: {:5.1%}  model mAP: {:5.1%}\n'.
-                format(epoch, cmc[0], mAP))
-############################
         checkpoint_state = {
             'state_dict': model_ema.state_dict(),
             'model_state_dict': model.state_dict(),
@@ -1313,7 +1219,16 @@ def main_worker_stage2(args,log_s1_name,log_s2_name):
             'dbscan_eps': (cluster_ir.eps, cluster_rgb.eps, cluster_all.eps),
             'cesa_state': None if cesa_state is None else cesa_state.state_dict(),
             'epoch': epoch + 1,
+            'best_R1': best_R1,
+            'best_epoch': best_epoch,
+            'selection_metric': BEST_SELECTION_METRIC,
+            'eval_g2a': eval_g2a,
+            'eval_a2g': eval_a2g,
         }
+        if best_updated:
+            best_path = save_best_checkpoint(checkpoint_state, args.logs_dir)
+            print('[CHECKPOINT] best epoch={} metric={} path={}'.format(
+                best_epoch, BEST_SELECTION_METRIC, best_path))
         _, final_path = save_fixed_epoch_checkpoint(
             checkpoint_state, args.logs_dir, epoch + 1 == args.epochs)
         print('[CHECKPOINT] latest epoch={} policy=fixed-final{}'.format(
@@ -1371,7 +1286,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval-step', type=int, default=1)
     parser.add_argument('--eval-during-train', type=parse_bool, nargs='?',
                         const=True, default=False,
-                        help='debug-only test evaluation; never selects checkpoints')
+                        help='evaluate Stage2 and retain the best G-to-A Rank-1 checkpoint')
     parser.add_argument('--trial', type=int, default=1)
     parser.add_argument('--temp', type=float, default=0.05,
                         help="temperature for scaling contrastive loss")

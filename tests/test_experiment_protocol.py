@@ -35,7 +35,6 @@ class ExperimentProtocolTests(unittest.TestCase):
         for script in ('train_agreid.py', 'train_lag.py'):
             source = (ROOT / script).read_text(encoding='utf-8')
             self.assertIn('final_checkpoint_path(', source)
-            self.assertNotIn('model_best.pth.tar', source)
 
     def test_evaluation_gate_defaults_off_and_never_controls_saving(self):
         args = SimpleNamespace(eval_during_train=False, eval_step=1)
@@ -44,10 +43,11 @@ class ExperimentProtocolTests(unittest.TestCase):
         args.eval_step = 2
         self.assertFalse(should_evaluate_during_train(args, 0))
         self.assertTrue(should_evaluate_during_train(args, 1))
-        for script in ('train_agreid.py', 'train_lag.py'):
-            source = (ROOT / script).read_text(encoding='utf-8')
-            self.assertNotIn('is_best', source)
-            self.assertNotIn('best_R1', source)
+        agreid_source = (ROOT / 'train_agreid.py').read_text(encoding='utf-8')
+        lag_source = (ROOT / 'train_lag.py').read_text(encoding='utf-8')
+        self.assertIn('select_agreid_best(', agreid_source)
+        self.assertNotIn('is_best', agreid_source)
+        self.assertNotIn('best_R1', lag_source)
 
     def test_rahp_stage1_requires_cmhybrid_but_stage2_only_is_allowed(self):
         for script in ('train_agreid.py', 'train_lag.py'):

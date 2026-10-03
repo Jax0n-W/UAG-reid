@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function, absolute_import
 import argparse
-import os.path as osp
 import random
 import numpy as np
-import time
 from PIL import Image
 
 import torch
 from torch import nn
 from torch.backends import cudnn
 import torch.utils.data as data
-from torch.autograd import Variable
 
-from clustercontrast import datasets
 from clustercontrast import models
-from clustercontrast.methods.evaluation import load_agw_checkpoint_strict
+from clustercontrast.methods.evaluation import (
+    evaluate_agreid_direction, evaluate_agreid_distances,
+    extract_agreid_features, load_agreid_split, load_agw_checkpoint_strict,
+)
 from clustercontrast.utils.data import transforms as T
 from clustercontrast.utils.serialization import load_checkpoint
 
@@ -47,122 +46,18 @@ class TestData(data.Dataset):
     def __len__(self):
         return len(self.test_img_file)
 
-def fliplr(img):
-    inv_idx = torch.arange(img.size(3)-1,-1,-1).long()
-    img_flip = img.index_select(3,inv_idx)
-    return img_flip
-
 def extract_gall_feat(model, gall_loader, ngall):
-    """提取 Aerial/IR 特征 (modal=2)"""
-    pool_dim = 2048
-    net = model
-    net.eval()
-    print('Extracting Feature (modal=2, Aerial/IR)...')
-    start = time.time()
-    ptr = 0
-    gall_feat_fc = np.zeros((ngall, pool_dim))
-    with torch.no_grad():
-        for batch_idx, (input, label) in enumerate(gall_loader):
-            batch_num = input.size(0)
-            flip_input = fliplr(input)
-            input = Variable(input.cuda())
-            feat_fc = net(input, input, 2)
-            flip_input = Variable(flip_input.cuda())
-            feat_fc_1 = net(flip_input, flip_input, 2)
-            feature_fc = (feat_fc.detach() + feat_fc_1.detach()) / 2
-            fnorm_fc = torch.norm(feature_fc, p=2, dim=1, keepdim=True)
-            feature_fc = feature_fc.div(fnorm_fc.expand_as(feature_fc))
-            gall_feat_fc[ptr:ptr+batch_num, :] = feature_fc.cpu().numpy()
-            ptr = ptr + batch_num
-    print('Extracting Time:\t {:.3f}'.format(time.time()-start))
-    return gall_feat_fc
+    return extract_agreid_features(model, gall_loader, ngall, modal=2)
 
 def extract_query_feat(model, query_loader, nquery):
-    """提取 Ground/RGB 特征 (modal=1)"""
-    pool_dim = 2048
-    net = model
-    net.eval()
-    print('Extracting Feature (modal=1, Ground/RGB)...')
-    start = time.time()
-    ptr = 0
-    query_feat_fc = np.zeros((nquery, pool_dim))
-    with torch.no_grad():
-        for batch_idx, (input, label) in enumerate(query_loader):
-            batch_num = input.size(0)
-            flip_input = fliplr(input)
-            input = Variable(input.cuda())
-            feat_fc = net(input, input, 1)
-            flip_input = Variable(flip_input.cuda())
-            feat_fc_1 = net(flip_input, flip_input, 1)
-            feature_fc = (feat_fc.detach() + feat_fc_1.detach()) / 2
-            fnorm_fc = torch.norm(feature_fc, p=2, dim=1, keepdim=True)
-            feature_fc = feature_fc.div(fnorm_fc.expand_as(feature_fc))
-            query_feat_fc[ptr:ptr+batch_num, :] = feature_fc.cpu().numpy()
-            ptr = ptr + batch_num
-    print('Extracting Time:\t {:.3f}'.format(time.time()-start))
-    return query_feat_fc
+    return extract_agreid_features(model, query_loader, nquery, modal=1)
 
 def process_test_agreid(img_dir, trial=1, modal='ground'):
-    if modal == 'ground':
-        input_data_path = osp.join(img_dir, 'idx', 'test_ground_{}.txt'.format(trial))
-    elif modal == 'aerial':
-        input_data_path = osp.join(img_dir, 'idx', 'test_aerial_{}.txt'.format(trial))
-    else:
-        raise ValueError("AG-ReID modal must be 'ground' or 'aerial'")
-    
-    with open(input_data_path) as f:
-        data_file_list = f.read().splitlines()
-        file_image = [osp.join(img_dir, s.split(' ')[0]) for s in data_file_list]
-        file_label = [int(s.split(' ')[1]) for s in data_file_list]
-        
-    return file_image, np.array(file_label)
+    return load_agreid_split(img_dir, trial, modal)
 
 def eval_agreid(distmat, q_pids, g_pids, max_rank=20, q_camids=None, g_camids=None):
-    num_q, num_g = distmat.shape
-    if num_g < max_rank: max_rank = num_g
-    indices = np.argsort(distmat, axis=1)
-    matches = (g_pids[indices] == q_pids[:, np.newaxis]).astype(np.int32)
-
-    all_cmc = []
-    all_AP = []
-    all_INP = []
-    num_valid_q = 0.
-    
-    if q_camids is None: q_camids = np.ones(num_q).astype(np.int32)
-    if g_camids is None: g_camids = 2 * np.ones(num_g).astype(np.int32)
-    
-    for q_idx in range(num_q):
-        q_pid = q_pids[q_idx]
-        q_camid = q_camids[q_idx]
-        order = indices[q_idx]
-        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
-        keep = np.invert(remove)
-
-        raw_cmc = matches[q_idx][keep]
-        if not np.any(raw_cmc): continue
-
-        cmc = raw_cmc.cumsum()
-        pos_idx = np.where(raw_cmc == 1)
-        pos_max_idx = np.max(pos_idx)
-        inp = cmc[pos_max_idx] / (pos_max_idx + 1.0)
-        all_INP.append(inp)
-
-        cmc[cmc > 1] = 1
-        all_cmc.append(cmc[:max_rank])
-        num_valid_q += 1.
-
-        num_rel = raw_cmc.sum()
-        tmp_cmc = raw_cmc.cumsum()
-        tmp_cmc = [x / (i+1.) for i, x in enumerate(tmp_cmc)]
-        tmp_cmc = np.asarray(tmp_cmc) * raw_cmc
-        AP = tmp_cmc.sum() / num_rel
-        all_AP.append(AP)
-
-    all_cmc = np.asarray(all_cmc).astype(np.float32)
-    all_cmc = all_cmc.sum(0) / num_valid_q
-    mAP = np.mean(all_AP)
-    mINP = np.mean(all_INP)
-    return all_cmc, mAP, mINP
+    return evaluate_agreid_distances(
+        distmat, q_pids, g_pids, max_rank, q_camids, g_camids)
 
 def main_worker(args):
     data_path = args.data_dir
