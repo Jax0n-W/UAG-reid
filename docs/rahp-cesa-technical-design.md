@@ -15,7 +15,7 @@ The starting tree contained only SYSU/RegDB. The user supplied `C:/Users/Jaxon/D
 | Stage 2 memory calls | `clustercontrast/trainers.py:124-204` | Encoder domain memories call `cm_hybrid`, including the encoder path of `CMhard`; ALL memory uses `CMhybrid`. `encoder_ema` calls `cm_hard` on `features_ema`, which stays unchanged. Cross loss remains at coefficient `0.25`. |
 | Dynamic hard proxy | `clustercontrast/models/cm.py:41-83` | Group by pseudo-ID, measure each instance against the old mean slot, update mean slot, select hard index, update hard slot. The disabled path keeps the original `np.argmin(np.array(distances))` and momentum formulas. |
 | PGM | `train_agreid.py` and `train_lag.py`, Stage 2; original analogues `train_sysu.py:985-1041` and `train_regdb.py:818-861` | Normalize prototypes, compute raw cosine, exponentiate, reciprocal cost, Hungarian plus original unmatched completion, then `r2i/i2r` label translation. `R` is the final edge set. CESA score calibration belongs strictly between raw cosine and `exp()`. Each entrypoint retains its original unmatched handling. |
-| Checkpoints | `train_agreid.py` and `train_lag.py`, both stages | Every epoch writes `checkpoint.pth.tar` for latest/resume. The predetermined last epoch also writes `model_final.pth.tar`. Test metrics never select a checkpoint. Stage 2 always stores model, EMA, optimizer, scheduler, RNG, DBSCAN eps, epoch and optional CESA state. |
+| Checkpoints | `train_agreid.py` and `train_lag.py`, both stages | Every epoch writes `checkpoint.pth.tar`; the predetermined last epoch also writes `model_final.pth.tar`. Formal AG-ReID additionally writes `model_best.pth.tar` from G-to-A Rank-1 in each stage and initializes Stage 2 from its own Stage 1 best. LAGPeR retains fixed-final selection. Stage 2 checkpoints store model, EMA, optimizer, scheduler, RNG, DBSCAN eps, epoch and optional CESA state. |
 
 ## RAHP shared API and algorithm
 
@@ -37,7 +37,9 @@ When `num_cluster_rgb < num_cluster_ir`, the frozen baseline does not execute PG
 
 ## Checkpoint and evaluation protocol
 
-Formal experiment checkpoint: **fixed final epoch**. Stage 1 and Stage 2 write `checkpoint.pth.tar` after every epoch and `model_final.pth.tar` only after the configured final epoch. Stage 2 initializes from the Stage 1 `model_final.pth.tar`. `--eval-during-train=False` is the default, so formal training does not read the test split each epoch. Enabling it is a debug-only logging option; Rank-1, mAP and mINP do not affect saving, resume, initialization, early stopping, or any training branch. Final evaluation is a separate command and loads the Stage 2 `model_final.pth.tar`.
+**OFFICIAL AG-ReID HISTORICAL ABLATION PROTOCOL: Stage1-best -> Stage2 -> Stage2-best.** Every formal AG-ReID run explicitly sets `--eval-during-train=True --eval-step 1 --stage1-init best`. Both stages evaluate A-to-G and G-to-A every epoch and select the earliest highest G-to-A Rank-1 checkpoint. Stage 2 initializes from that run's own Stage 1 `model_best.pth.tar`; final historical comparison uses its Stage 2 `model_best.pth.tar`. Baseline, RAHP-only, CESA-only, and Full use independent log roots. CESA-only therefore trains its own baseline-like Stage 1, while Full trains its own RAHP Stage 1. No checkpoint is shared across runs.
+
+The fixed-final implementation remains available for compatibility through `--stage1-init final` and Stage 2 `model_final.pth.tar`, but it is not the frozen AG-ReID historical ablation protocol. LAGPeR retains its existing fixed-final protocol.
 
 RAHP Stage 1 requires `--memorybank CMhybrid`. An explicit `--use-rahp` with Stage 1 and any other memory bank raises `ValueError`. `--stage2-only --use-rahp` remains valid because it skips Stage 1.
 
@@ -97,7 +99,8 @@ suffix. LAGPeR follows the prepared manifest contract above. The formal scripts 
 | temperature / seed / workers | `0.05` / `1` / `8` |
 | RAHP | beta `0.25`, KNN `20`, alpha `0.5` |
 | CESA | rho `0.8`, eta `0.1`, lineage threshold `0.5`, warmup `5` |
-| evaluation during training | `False` |
+| AG-ReID evaluation / Stage 1 init | every epoch (`True`, step `1`) / `best` |
+| LAGPeR evaluation during training | `False` |
 
 ```bash
 DATA_DIR=/path/to/AG-ReID-root LOGS_DIR=logs/agreid PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_agreid_ablation.sh
@@ -112,7 +115,7 @@ continue to accept `--eps VALUE`.
 The standalone test scripts parameterize all paths and runtime loader settings. AG-ReID reports A to G and G to A. LAGPeR reports A to G, G to A, and G to A+G:
 
 ```bash
-python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
+python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_best.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
 python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
 ```
 

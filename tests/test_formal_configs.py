@@ -28,7 +28,6 @@ REQUIRED = {
     '--trial': '1',
     '--workers': '8',
     '--pooling-type': 'gem',
-    '--eval-during-train=False': None,
     '--rahp-beta': '0.25',
     '--rahp-knn': '20',
     '--rahp-alpha': '0.5',
@@ -67,6 +66,26 @@ class FormalConfigTests(unittest.TestCase):
             self.assertNotIn('--use-rahp', tokens)
             self.assertNotIn('--use-cesa', tokens)
             self.assertIn('EPS="${EPS:-0.6}"', source)
+
+    def test_agreid_uses_official_historical_best_protocol(self):
+        source = (ROOT / 'scripts' / 'run_agreid_ablation.sh').read_text(
+            encoding='utf-8')
+        tokens = common_tokens(source)
+        self.assertIn('--eval-during-train=True', tokens)
+        self.assertEqual(tokens[tokens.index('--eval-step') + 1], '1')
+        self.assertEqual(tokens[tokens.index('--stage1-init') + 1], 'best')
+        self.assertNotIn('--stage1-init final', source)
+        self.assertIn(
+            'OFFICIAL AG-ReID HISTORICAL ABLATION PROTOCOL:', source)
+        self.assertIn('Stage1-best -> Stage2 -> Stage2-best', source)
+        self.assertIn('--logs-dir "$LOGS_DIR/$name"', source)
+
+    def test_lagper_retains_fixed_final_protocol(self):
+        source = (ROOT / 'scripts' / 'run_lagper_ablation.sh').read_text(
+            encoding='utf-8')
+        tokens = common_tokens(source)
+        self.assertIn('--eval-during-train=False', tokens)
+        self.assertNotIn('--stage1-init', tokens)
 
     def test_frozen_batch_contains_complete_sampler_groups(self):
         self.assertGreaterEqual(64, 2 * 16)

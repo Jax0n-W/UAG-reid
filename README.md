@@ -108,7 +108,9 @@ The testing script loads the trained checkpoint and computes metrics such as **R
 
 ## AG-ReID / LAGPeR RAHP and CESA experiments
 
-All four formal ablations use `CMhybrid` in Stage 1 and disable training-time test evaluation. Checkpoints follow a fixed final epoch policy; use the Stage 2 `model_final.pth.tar` for final evaluation. Training and testing require the same `resnet50-19c8e357.pth` through `PRETRAINED_RESNET50`, `--pretrained-resnet50`, or `PCLHD_RESNET50_PRETRAINED`.
+**OFFICIAL AG-ReID HISTORICAL ABLATION PROTOCOL: Stage1-best -> Stage2 -> Stage2-best.** All four AG-ReID runs explicitly use `--eval-during-train=True --eval-step 1 --stage1-init best`. Stage 1 and Stage 2 evaluate A-to-G and G-to-A every epoch, and both select their earliest highest G-to-A Rank-1 checkpoint. Final historical comparison uses the Stage 2 `model_best.pth.tar`. Each run has its own log root, so CESA-only trains its own baseline-like Stage 1 and Full trains its own RAHP Stage 1.
+
+LAGPeR retains its fixed-final protocol. Training and testing require the same `resnet50-19c8e357.pth` through `PRETRAINED_RESNET50`, `--pretrained-resnet50`, or `PCLHD_RESNET50_PRETRAINED`.
 
 The AG-ReID `DATA_DIR` is the shared root containing
 `aerial_modify/{trial}/bounding_box_train`,
@@ -116,12 +118,13 @@ The AG-ReID `DATA_DIR` is the shared root containing
 plus `idx/test_ground_{trial}.txt`. Do not append `agreid_ir` or `agreid_rgb`.
 
 ```bash
-# Frozen Baseline / RAHP / CESA / Full suites
+# Official AG-ReID historical Baseline / RAHP / CESA / Full suite
 DATA_DIR=/path/to/AG-ReID-root LOGS_DIR=logs/agreid PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_agreid_ablation.sh
+# LAGPeR fixed-final suite
 DATA_DIR=/path/to/LAGPeR-root LOGS_DIR=logs/lagper PRETRAINED_RESNET50=/path/to/resnet50-19c8e357.pth bash scripts/run_lagper_ablation.sh
 
 # Separate final evaluation
-python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
+python test_agreid.py --data-dir /path/to/AG-ReID-root --checkpoint /path/to/stage2/model_best.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
 python test_LAG.py --data-dir /path/to/LAGPeR-root --checkpoint /path/to/stage2/model_final.pth.tar --pretrained-resnet50 /path/to/resnet50-19c8e357.pth --trial 1 --batch-size 64 --workers 8
 ```
 

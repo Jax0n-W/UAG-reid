@@ -6,6 +6,9 @@ LOGS_DIR="${LOGS_DIR:-logs}"
 PRETRAINED_RESNET50="${PRETRAINED_RESNET50:?Set PRETRAINED_RESNET50 to resnet50-19c8e357.pth}"
 EPS="${EPS:-0.6}"
 
+echo "OFFICIAL AG-ReID HISTORICAL ABLATION PROTOCOL:"
+echo "Stage1-best -> Stage2 -> Stage2-best"
+
 COMMON_ARGS=(
   --dataset agreid_ir
   --data-dir "$DATA_DIR"
@@ -33,7 +36,8 @@ COMMON_ARGS=(
   --workers 8
   --pooling-type gem
   --eval-step 1
-  --eval-during-train=False
+  --eval-during-train=True
+  --stage1-init best
   --rahp-beta 0.25
   --rahp-knn 20
   --rahp-alpha 0.5
