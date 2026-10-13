@@ -16,6 +16,8 @@ import faiss
 import torch
 import torch.nn.functional as F
 
+from clustercontrast.domain_metadata import (
+    DOMAIN_AERIAL, DOMAIN_GROUND, validate_domain_flags)
 from .faiss_utils import search_index_pytorch, search_raw_array_pytorch, \
                             index_init_gpu, index_init_cpu
 
@@ -149,12 +151,52 @@ def _resolve_modalities(file, sample_count, modalities=None):
     return resolved
 
 
+def domain_balanced_query_expansion(V, initial_rank, k2, domain_flags):
+    """Legacy-equivalent domain-balanced expansion using row-aligned flags."""
+    domain_flags = validate_domain_flags(
+        domain_flags, V.shape[0], 'Jaccard query-expansion domain flags')
+    if initial_rank.shape[0] != V.shape[0]:
+        raise ValueError('initial_rank rows do not match Jaccard feature rows')
+    V_qe = np.zeros_like(V, dtype=V.dtype)
+    for i in range(V.shape[0]):
+        aerial_rows = []
+        ground_rows = []
+        for neighbor in initial_rank[i, :k2]:
+            if domain_flags[int(neighbor)] == DOMAIN_AERIAL:
+                aerial_rows.append(V[int(neighbor), :])
+            elif domain_flags[int(neighbor)] == DOMAIN_GROUND:
+                ground_rows.append(V[int(neighbor), :])
+        if not aerial_rows and not ground_rows:
+            raise RuntimeError('Query expansion found no valid domain neighbors')
+        if not ground_rows:
+            V_qe[i, :] = np.mean(np.asarray(aerial_rows), axis=0)
+        elif not aerial_rows:
+            V_qe[i, :] = np.mean(np.asarray(ground_rows), axis=0)
+        else:
+            V_qe[i, :] = np.mean(
+                [np.mean(np.asarray(aerial_rows), axis=0),
+                 np.mean(np.asarray(ground_rows), axis=0)], axis=0)
+    return V_qe
+
+
 def compute_modal_invariant_jaccard_distance(
-        target_features, file, k1=20, k2=6, print_flag=True,
-        search_option=0, use_float16=False, modalities=None):
+        target_features, file=None, k1=20, k2=6, print_flag=True,
+        search_option=0, use_float16=False, modalities=None,
+        domain_flags=None):
     end = time.time()
-    resolved_modalities = _resolve_modalities(
-        file, target_features.size(0), modalities=modalities)
+    sample_count = target_features.size(0)
+    if domain_flags is None:
+        if file is None and modalities is None:
+            raise ValueError('file, modalities, or explicit domain_flags is required')
+        resolved_modalities = _resolve_modalities(
+            file, sample_count, modalities=modalities)
+        domain_flags = tuple(
+            DOMAIN_AERIAL if modality == 'ir' else DOMAIN_GROUND
+            for modality in resolved_modalities)
+    else:
+        domain_flags = validate_domain_flags(
+            domain_flags, sample_count,
+            'modal-invariant Jaccard domain flags')
 
     if print_flag:
         print('Computing jaccard distance...')
@@ -215,35 +257,8 @@ def compute_modal_invariant_jaccard_distance(
 
 
     if k2 != 1:
-        V_qe = np.zeros_like(V, dtype=mat_type)
-        for i in range(N):
-            feas_NIR_temp=[]
-            feas_VIS_temp=[]
-            # V_qe[i,:] = np.mean(V[initial_rank[i,:k2],:], axis=0)
-
-
-            for ii in initial_rank[i,:k2]:
-
-                if resolved_modalities[ii] == 'ir':
-                    feas_NIR_temp.append(V[ii,:])
-                elif resolved_modalities[ii] == 'rgb':
-                    feas_VIS_temp.append(V[ii,:])
-            if len(feas_VIS_temp) == 0 and len(feas_NIR_temp) == 0:
-                raise RuntimeError(
-                    'Query expansion found no valid modality neighbors')
-            if len(feas_VIS_temp) == 0:
-                V_qe[i, :] = np.mean(np.asarray(feas_NIR_temp), axis=0)
-            elif len(feas_NIR_temp) == 0:
-                V_qe[i, :] = np.mean(np.asarray(feas_VIS_temp), axis=0)
-            else:
-                NIR_embedings_person_mean = np.mean(
-                    np.asarray(feas_NIR_temp), axis=0)
-                VIS_embedings_person_mean = np.mean(
-                    np.asarray(feas_VIS_temp), axis=0)
-                V_qe[i, :] = np.mean(
-                    [NIR_embedings_person_mean, VIS_embedings_person_mean],
-                    axis=0)
-
+        V_qe = domain_balanced_query_expansion(
+            V, initial_rank, k2, domain_flags)
         V = V_qe
         del V_qe
 

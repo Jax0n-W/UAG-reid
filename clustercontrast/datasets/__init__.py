@@ -15,6 +15,8 @@ from .agreid_ir import agreid_ir
 from .agreid_rgb import agreid_rgb
 from .lag_ir import lag_ir
 from .lag_rgb import lag_rgb
+from .g2aps_aerial import g2aps_aerial
+from .g2aps_ground import g2aps_ground
 __factory = {
     'market1501': Market1501,
     'msmt17': MSMT17,
@@ -29,7 +31,9 @@ __factory = {
     'agreid_ir': agreid_ir,
     'agreid_rgb': agreid_rgb,
     'lag_ir': lag_ir,
-    'lag_rgb': lag_rgb
+    'lag_rgb': lag_rgb,
+    'g2aps_aerial': g2aps_aerial,
+    'g2aps_ground': g2aps_ground,
 }
 
 

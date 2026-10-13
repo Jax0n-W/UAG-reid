@@ -20,6 +20,13 @@ import torch.nn.functional as F
 from clustercontrast import datasets
 from clustercontrast import models
 from clustercontrast.datasets.lagper_protocol import evaluation_arrays
+from clustercontrast.domain_metadata import (
+    DOMAIN_AERIAL, DOMAIN_GROUND, concatenate_domain_rows,
+    cross_domain_cluster_ids, domain_flags_for_samples,
+    generate_domain_balanced_cluster_features,
+    validate_domain_flags,
+)
+from clustercontrast.memory_lifecycle import cluster_precomputed_ephemeral
 from clustercontrast.models.cm import ClusterMemory
 from clustercontrast.methods.rahp import (
     RAHPSelectionStats, compute_rahp_reliability, disabled_rahp_diagnostics,
@@ -303,31 +310,29 @@ def eval_regdb(distmat, q_pids, g_pids, max_rank=20):
     return all_cmc, mAP, mINP
 
 
-def associated_analysis_for_all(all_origin, all_pred, modalities_for_all, log_dir):
-    label_count_all = -1
-    all_label_set = list(set(all_pred))
-    all_label_set.sort()
-    class_NIRVIS_list_modal_all = []
-    associate = 0
+def associated_analysis_for_all(all_labels, samples, log_dir,
+                                domain_flags=None):
+    del log_dir
+    if domain_flags is None:
+        from clustercontrast.domain_metadata import infer_legacy_domain_flags
+        domain_flags = infer_legacy_domain_flags(samples)
+    domain_flags = validate_domain_flags(
+        domain_flags, len(all_labels), 'ALL association domain flags')
+    valid_clusters = cross_domain_cluster_ids(all_labels, domain_flags)
+    all_clusters = {int(label) for label in all_labels if int(label) != -1}
     flag_ir_list = collections.defaultdict(list)
     flag_rgb_list = collections.defaultdict(list)
-    for idx_, lab_ in enumerate(all_label_set):
-        label_count_all += 1
-        class_NIRVIS_list_modal = []
-        flag_ir = 0
-        flag_rgb = 0
-        for idx, lab in enumerate(all_pred):
-            if lab_ == lab:
-                if modalities_for_all[idx] == 'aerial':
-                    flag_ir = 1
-                    flag_ir_list[idx_] = 1
-                elif modalities_for_all[idx] == 'ground':
-                    flag_rgb = 1
-                    flag_rgb_list[idx_] = 1
-        class_NIRVIS_list_modal_all.extend([class_NIRVIS_list_modal])
-        if flag_ir == 1 and flag_rgb == 1:
-            associate = associate + 1
-    print('associate rate', associate / len(all_label_set))
+    for cluster_id in all_clusters:
+        cluster_domains = {
+            domain for label, domain in zip(all_labels, domain_flags)
+            if int(label) == cluster_id
+        }
+        if DOMAIN_AERIAL in cluster_domains:
+            flag_ir_list[cluster_id] = 1
+        if DOMAIN_GROUND in cluster_domains:
+            flag_rgb_list[cluster_id] = 1
+    rate = len(valid_clusters) / float(len(all_clusters)) if all_clusters else 0.0
+    print('associate rate', rate)
     return flag_ir_list, flag_rgb_list
 
 
@@ -607,6 +612,14 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
     print("==> Load unlabeled dataset")
     dataset_ir = get_data('lag_ir', args.data_dir, trial=trial)
     dataset_rgb = get_data('lag_rgb', args.data_dir, trial=trial)
+    ir_train = sorted(dataset_ir.train)
+    rgb_train = sorted(dataset_rgb.train)
+    ir_domain_flags = domain_flags_for_samples(dataset_ir, ir_train)
+    rgb_domain_flags = domain_flags_for_samples(dataset_rgb, rgb_train)
+    all_rows = concatenate_domain_rows(
+        (rgb_train, rgb_domain_flags), (ir_train, ir_domain_flags))
+    all_train = list(all_rows.samples)
+    all_domain_flags = all_rows.flags
 
     test_loader_ir = get_test_loader(dataset_ir, args.height, args.width, args.batch_size, args.workers)
     test_loader_rgb = get_test_loader(dataset_rgb, args.height, args.width, args.batch_size, args.workers)
@@ -659,43 +672,40 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             print('==> Create pseudo labels for unlabeled RGB data')
             cluster_loader_rgb = get_test_loader(dataset_rgb, args.height, args.width,
                                                   args.batch_size, args.workers,
-                                                  testset=sorted(dataset_rgb.train))
+                                                  testset=rgb_train)
             features_rgb_ema, _ = extract_features(model_ema, cluster_loader_rgb, print_freq=50, mode=1)
-            features_rgb_ema = torch.cat([features_rgb_ema[f].unsqueeze(0) for f, _, _ in sorted(dataset_rgb.train)], 0)
+            features_rgb_ema = torch.cat([features_rgb_ema[f].unsqueeze(0) for f, _, _ in rgb_train], 0)
             features_rgb, _ = extract_features(model, cluster_loader_rgb, print_freq=50, mode=1)
             del cluster_loader_rgb,
-            features_rgb = torch.cat([features_rgb[f].unsqueeze(0) for f, _, _ in sorted(dataset_rgb.train)], 0)
+            features_rgb = torch.cat([features_rgb[f].unsqueeze(0) for f, _, _ in rgb_train], 0)
 
             print('==> Create pseudo labels for unlabeled IR data')
             cluster_loader_ir = get_test_loader(dataset_ir, args.height, args.width,
                                                   args.batch_size, args.workers,
-                                                  testset=sorted(dataset_ir.train))
+                                                  testset=ir_train)
             features_ir_ema, _ = extract_features(model_ema, cluster_loader_ir, print_freq=50, mode=2)
-            features_ir_ema = torch.cat([features_ir_ema[f].unsqueeze(0) for f, _, _ in sorted(dataset_ir.train)], 0)
+            features_ir_ema = torch.cat([features_ir_ema[f].unsqueeze(0) for f, _, _ in ir_train], 0)
             features_ir, _ = extract_features(model, cluster_loader_ir, print_freq=50, mode=2)
             del cluster_loader_ir
-            features_ir = torch.cat([features_ir[f].unsqueeze(0) for f, _, _ in sorted(dataset_ir.train)], 0)
+            features_ir = torch.cat([features_ir[f].unsqueeze(0) for f, _, _ in ir_train], 0)
 
             print('==> Create pseudo labels for unlabeled ALL data')
             features_all = torch.cat([features_rgb, features_ir], dim=0)
 
-            rerank_dist_ir = compute_jaccard_distance(features_ir, k1=args.k1, k2=args.k2, search_option=3)
-            pseudo_labels_ir = cluster_ir.fit_predict(rerank_dist_ir)
-            rerank_dist_rgb = compute_jaccard_distance(features_rgb, k1=args.k1, k2=args.k2, search_option=3)
-            pseudo_labels_rgb = cluster_rgb.fit_predict(rerank_dist_rgb)
-            rerank_dist_all = compute_modal_invariant_jaccard_distance(
-                features_all, k1=args.k1, k2=args.k2,
-                file=sorted(dataset_rgb.train) + sorted(dataset_ir.train),
-                modalities=(['rgb'] * len(features_rgb) +
-                            ['ir'] * len(features_ir)),
-                search_option=3)
-            pseudo_labels_all = cluster_all.fit_predict(rerank_dist_all)
-            del rerank_dist_rgb
-            del rerank_dist_ir
-            del rerank_dist_all
-            num_cluster_ir = len(set(pseudo_labels_ir)) - (1 if -1 in pseudo_labels_ir else 0)
-            num_cluster_rgb = len(set(pseudo_labels_rgb)) - (1 if -1 in pseudo_labels_rgb else 0)
-            num_cluster_all = len(set(pseudo_labels_all)) - (1 if -1 in pseudo_labels_all else 0)
+            pseudo_labels_ir, num_cluster_ir = cluster_precomputed_ephemeral(
+                lambda: compute_jaccard_distance(
+                    features_ir, k1=args.k1, k2=args.k2, search_option=3),
+                cluster_ir, 'Aerial')
+            pseudo_labels_rgb, num_cluster_rgb = cluster_precomputed_ephemeral(
+                lambda: compute_jaccard_distance(
+                    features_rgb, k1=args.k1, k2=args.k2, search_option=3),
+                cluster_rgb, 'Ground')
+            pseudo_labels_all, num_cluster_all = cluster_precomputed_ephemeral(
+                lambda: compute_modal_invariant_jaccard_distance(
+                    features_all, k1=args.k1, k2=args.k2,
+                    file=all_train, domain_flags=all_domain_flags,
+                    search_option=3),
+                cluster_all, 'ALL')
 
         @torch.no_grad()
         def generate_cluster_features(labels, features):
@@ -711,34 +721,10 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             return centers
 
         @torch.no_grad()
-        def generate_modal_invariant_cluster_features(labels, num_cluster_all, features, file):
-            centers_IR = collections.defaultdict(list)
-            centers_RBG = collections.defaultdict(list)
-            centers_IR_mean = collections.defaultdict(list)
-            centers_RBG_mean = collections.defaultdict(list)
-            ground_count = len(dataset_rgb.train)
-            for i, (label, (fname, _, cid)) in enumerate(zip(labels, file)):
-                if label == -1:
-                    continue
-                if i >= ground_count:
-                    centers_IR[labels[i]].append(features[i])
-                else:
-                    centers_RBG[labels[i]].append(features[i])
-            for i in range(num_cluster_all):
-                if centers_RBG[i] != []:
-                    centers_RBG_mean[i] = torch.stack(centers_RBG[i], dim=0).mean(0)
-                if centers_IR[i] != []:
-                    centers_IR_mean[i] = torch.stack(centers_IR[i], dim=0).mean(0)
-            centers_all = []
-            for i in range(num_cluster_all):
-                if centers_RBG_mean[i] == []:
-                    centers_all.append(centers_IR_mean[i])
-                elif centers_IR_mean[i] == []:
-                    centers_all.append(centers_RBG_mean[i])
-                else:
-                    centers_all.append(torch.mean(torch.stack([centers_RBG_mean[i], centers_IR_mean[i]], dim=0), dim=0))
-            centers_all = torch.stack(centers_all, dim=0)
-            return centers_all
+        def generate_modal_invariant_cluster_features(
+                labels, num_cluster_all, features, domain_flags):
+            return generate_domain_balanced_cluster_features(
+                labels, num_cluster_all, features, domain_flags)
 
         def generate_random_features(labels, features, num_cluster, num_instances):
             indexes = np.zeros(num_cluster * num_instances)
@@ -755,8 +741,7 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
         cluster_features_rgb = generate_cluster_features(pseudo_labels_rgb, features_rgb)
         cluster_features_all = generate_modal_invariant_cluster_features(pseudo_labels_all, num_cluster_all,
                                                                          features_all,
-                                                                         sorted(dataset_rgb.train) + sorted(
-                                                                             dataset_ir.train))
+                                                                         all_domain_flags)
         memory_ir = ClusterMemory(model.module.num_features, num_cluster_ir, temp=args.temp,
                                   momentum=args.momentum, mode=args.memorybank, smooth=args.smooth,
                                   num_instances=args.num_instances).cuda()
@@ -809,7 +794,7 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
         pseudo_labeled_dataset_ir = []
         ir_label = []
         q_ir_filtered = []
-        for i, ((fname, _, cid), label) in enumerate(zip(sorted(dataset_ir.train), pseudo_labels_ir)):
+        for i, ((fname, _, cid), label) in enumerate(zip(ir_train, pseudo_labels_ir)):
             if label != -1:
                 pseudo_labeled_dataset_ir.append((fname, label.item(), cid))
                 ir_label.append(label.item())
@@ -820,7 +805,7 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
         pseudo_labeled_dataset_rgb = []
         rgb_label = []
         q_rgb_filtered = []
-        for i, ((fname, _, cid), label) in enumerate(zip(sorted(dataset_rgb.train), pseudo_labels_rgb)):
+        for i, ((fname, _, cid), label) in enumerate(zip(rgb_train, pseudo_labels_rgb)):
             if label != -1:
                 pseudo_labeled_dataset_rgb.append((fname, label.item(), cid))
                 rgb_label.append(label.item())
@@ -830,17 +815,15 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
 
         all_label = []
         all_file_name = []
-        all_modalities = []
-        ground_count = len(dataset_rgb.train)
         for i, ((fname, _, cid), label) in enumerate(
-                zip(sorted(dataset_rgb.train) + sorted(dataset_ir.train), pseudo_labels_all)):
+                zip(all_train, pseudo_labels_all)):
             if label != -1:
                 all_file_name.append(fname)
                 all_label.append(label.item())
-                all_modalities.append('ground' if i < ground_count else 'aerial')
 
-        flag_ir_list, flag_rgb_list = associated_analysis_for_all(pseudo_labels_all, all_label, all_modalities,
-                                                                  args.logs_dir)
+        flag_ir_list, flag_rgb_list = associated_analysis_for_all(
+            pseudo_labels_all, all_train, args.logs_dir,
+            domain_flags=all_domain_flags)
         print('==> Statistics for ALL epoch {}: {} clusters'.format(epoch, num_cluster_all))
 
         all_label = []
@@ -848,16 +831,20 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
         pseudo_labeled_dataset_all_rgb = []
         q_all_ir_filtered = []
         q_all_rgb_filtered = []
-        for i, ((fname, _, cid), label) in enumerate(
-                zip(sorted(dataset_rgb.train) + sorted(dataset_ir.train), pseudo_labels_all)):
+        for i, (((fname, _, cid), label), domain) in enumerate(
+                zip(zip(all_train, pseudo_labels_all), all_domain_flags)):
             if label != -1:
                 all_file_name.append(fname)
                 all_label.append(label.item())
-            if (not args.use_rahp or label != -1) and i >= ground_count and flag_ir_list[label] == 1 and flag_rgb_list[label] == 1:
+            if (label != -1 and domain == DOMAIN_AERIAL
+                    and flag_ir_list[label] == 1
+                    and flag_rgb_list[label] == 1):
                 pseudo_labeled_dataset_all_ir.append((fname, label.item(), cid))
                 if args.use_rahp:
                     q_all_ir_filtered.append(q_all_full[i])
-            elif (not args.use_rahp or label != -1) and i < ground_count and flag_ir_list[label] == 1 and flag_rgb_list[label] == 1:
+            elif (label != -1 and domain == DOMAIN_GROUND
+                  and flag_ir_list[label] == 1
+                  and flag_rgb_list[label] == 1):
                 pseudo_labeled_dataset_all_rgb.append((fname, label.item(), cid))
                 if args.use_rahp:
                     q_all_rgb_filtered.append(q_all_full[i])
@@ -899,8 +886,6 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
                 for idx, item in enumerate(unmatched_row_ind):
                     R.append((unmatched_row[idx], unmatched_col_ind[idx]))
                     r2i[unmatched_row[idx]] = unmatched_col_ind[idx]
-            del cluster_features_ir, cluster_features_rgb
-
         print("Finish Bipartite Graph Matching")
         if cesa_state is not None and pgm_executed:
             # PGM R is (ground, aerial); CESA stores (aerial, ground).
@@ -916,6 +901,10 @@ def main_worker_stage2(args, log_s1_name, log_s2_name):
             print(format_cesa_epoch(disabled_cesa_diagnostics(
                 len(R), pgm_executed=pgm_executed)))
         ####################################
+        del features_all, features_ir, features_rgb
+        del features_ir_ema, features_rgb_ema
+        del memory_features_ir, memory_features_rgb
+        del cluster_features_all, cluster_features_ir, cluster_features_rgb
         normalizer = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         height = args.height
         width = args.width
